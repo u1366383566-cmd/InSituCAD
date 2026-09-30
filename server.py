@@ -368,6 +368,7 @@ def list_providers():
             "price_in": p.get("price_in"),
             "price_out": p.get("price_out"),
             "balance_url": p.get("balance_url"),
+            "disable_thinking": bool(p.get("disable_thinking")),
         })
     return {"providers": items, "active_provider": cfg.get("active_provider")}
 
@@ -392,6 +393,8 @@ def save_provider(payload: Dict[str, Any]):
         "vision_model": vision_model,
         "price_in": payload.get("price_in"), "price_out": payload.get("price_out"),
         "balance_url": str(payload.get("balance_url", "") or "").strip() or None,
+        # GLM 等推理模型默认深度思考，勾选后读图/验图请求带 thinking=disabled 大幅提速
+        "disable_thinking": bool(payload.get("disable_thinking")),
     }
     for i, p in enumerate(providers):
         if p.get("id") == pid:
@@ -418,7 +421,8 @@ def activate_provider(payload: Dict[str, Any]):
     if not target:
         raise HTTPException(status_code=404, detail="未找到该引擎")
     ok, message = cad_pdf_translator.verify_vision_provider(
-        target["base_url"], target["api_key"], target["vision_model"])
+        target["base_url"], target["api_key"], target["vision_model"],
+        disable_thinking=bool(target.get("disable_thinking")))
     if not ok:
         return {"success": False, "message": message}
     cad_pdf_translator.save_providers(cfg.get("providers", []), active_id=pid)

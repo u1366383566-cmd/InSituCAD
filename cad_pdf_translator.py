@@ -154,7 +154,7 @@ def save_providers(providers, active_id=None):
     save_config(cfg)
 
 
-def verify_vision_provider(base_url, api_key, model):
+def verify_vision_provider(base_url, api_key, model, disable_thinking=False):
     """启用前验图：发一张含中英文的测试图，模型真能读出文字才允许启用。
     这是硬性限制——读图+翻译是同一步，纯文本模型无法承担翻译引擎角色。"""
     try:
@@ -173,11 +173,14 @@ def verify_vision_provider(base_url, api_key, model):
         url = base_url.rstrip('/')
         if not url.endswith('/chat/completions'):
             url += '/chat/completions'
-        r = requests.post(url, headers={'Authorization': f'Bearer {api_key}'},
-            json={'model': model, 'temperature': 0, 'messages': [{'role': 'user', 'content': [
+        payload = {'model': model, 'temperature': 0, 'messages': [{'role': 'user', 'content': [
                 {'type': 'text', 'text': '逐行读出图片中的所有文字，保持原文，一行一条，只输出文字本身。'},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{png_b64}'}}]}]},
-            timeout=90)
+                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{png_b64}'}}]}]}
+        if disable_thinking:
+            # GLM 等推理模型默认深度思考，验图这类结构化任务关掉可大幅提速
+            payload['thinking'] = {'type': 'disabled'}
+        r = requests.post(url, headers={'Authorization': f'Bearer {api_key}'},
+            json=payload, timeout=90)
         if r.status_code != 200:
             try:
                 detail = r.json().get('error', {}).get('message', '') or r.text[:150]
@@ -411,6 +414,9 @@ def vision_read_translate(grid_png_bytes, provider, target_lang, ocr_hints):
             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + img_b64}},
         ]}],
     }
+    if provider.get('disable_thinking'):
+        # GLM 等推理模型默认深度思考（每页多花数十秒），结构化读图翻译任务可安全关闭
+        payload['thinking'] = {'type': 'disabled'}
     r = requests.post(url, headers={
             'Authorization': f"Bearer {provider['api_key']}",
             'Content-Type': 'application/json'},

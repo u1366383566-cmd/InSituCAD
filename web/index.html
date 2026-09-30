@@ -642,6 +642,10 @@
           <label class="block text-xs font-medium text-inkBody mb-1">视觉模型名 *（必须支持图片输入，启用时自动验图）</label>
           <input type="text" id="engModelInput" placeholder="如: deepseek-chat / glm-4v-flash / qwen-vl-plus" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs font-mono text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
         </div>
+        <label class="flex items-start gap-2 text-xs text-inkBody cursor-pointer select-none">
+          <input type="checkbox" id="engNoThinkInput" class="accent-blue-600 rounded mt-0.5">
+          <span><b class="text-inkTitle">关闭深度思考</b>（翻译场景推荐勾选，默认已勾选：GLM 等推理模型可提速数倍且准确率基本不受影响；不支持的引擎会自动忽略此参数）</span>
+        </label>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-inkBody mb-1">输入单价（元/百万 Token，可选）</label>
@@ -1907,6 +1911,7 @@
       $('engPriceInInput').value = '';
       $('engPriceOutInput').value = '';
       $('engBalanceUrlInput').value = '';
+      $('engNoThinkInput').checked = true;  // 翻译为结构化任务，新引擎默认关闭深度思考提速
       $('engineSaveActivateBtn').classList.toggle('hidden', !!id);
       if (id) {
         try {
@@ -1921,6 +1926,7 @@
             $('engPriceInInput').value = p.price_in ?? '';
             $('engPriceOutInput').value = p.price_out ?? '';
             $('engBalanceUrlInput').value = p.balance_url || '';
+            $('engNoThinkInput').checked = !!p.disable_thinking;
           }
         } catch (e) { console.error(e); }
       }
@@ -1958,6 +1964,7 @@
             price_in: price_in === '' ? null : Number(price_in),
             price_out: price_out === '' ? null : Number(price_out),
             balance_url: balance_url || null,
+            disable_thinking: $('engNoThinkInput').checked,
           })
         });
         if (!resp.ok) {
