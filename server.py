@@ -460,6 +460,8 @@ async def start_cad_translation(
     clean_name = sanitize_upload_name(file.filename)
     if not clean_name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="请上传 PDF 格式的 CAD 图纸文件")
+    # 语言代码不在支持列表时按中文处理，避免畸形输入生成乱码后缀
+    target_lang = target_lang if target_lang in cad_pdf_translator.LANG_NAMES else "zh"
 
     prune_old_tasks()
 
@@ -467,16 +469,18 @@ async def start_cad_translation(
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # 输出名使用原始文件名；仅当同名任务正在处理时才追加 task_id 防止互踩，
-    # 否则覆盖旧版（重复翻译同一本书时替换旧文件，符合直觉）
-    base = os.path.splitext(clean_name)[0]
-    out_name = f"{base}_专业中文版.pdf"
+    # 输出名 = 去掉旧翻译后缀的原始主名 + 按目标语言生成的后缀（如 _专业俄语版）；
+    # 仅当同名任务正在处理时才插入 task_id 防止互踩，否则覆盖旧版
+    # （重复翻译同一本书时替换旧文件，符合直觉）
+    base = cad_pdf_translator.strip_translation_suffix(os.path.splitext(clean_name)[0])
+    suffix = cad_pdf_translator.cad_output_suffix(target_lang)
+    out_name = f"{base}_{suffix}.pdf"
     name_busy = any(
         TASKS[tid].get("output_name") == out_name and TASKS[tid].get("status") in ("pending", "processing")
         for tid in TASKS if tid != task_id
     )
     if name_busy:
-        out_name = f"{base}_{task_id}_专业中文版.pdf"
+        out_name = f"{base}_{task_id}_{suffix}.pdf"
     out_pdf = os.path.join(OUTPUT_DIR, out_name)
 
     # 引擎快照：任务开始时锁定，中途切换引擎不影响本任务
@@ -538,7 +542,7 @@ async def get_task_status(task_id: str):
     return TASKS[task_id]
 
 # ==================== 常规文档任务 ====================
-def run_doc_task_worker(task_id: str, input_path: str, upload_base: str, out_base: str, mode: str, provider: Dict[str, Any]):
+def run_doc_task_worker(task_id: str, input_path: str, upload_base: str, out_base: str, mode: str, provider: Dict[str, Any], target_lang: str = "zh"):
     """provider 为任务创建时锁定的引擎快照（OpenAI 兼容协议）"""
     babeldoc_exe = os.path.join(BASE_DIR, "venv", "Scripts", "babeldoc.exe")
     out_type = "dual" if mode == "dual" else "mono"
@@ -550,8 +554,8 @@ def run_doc_task_worker(task_id: str, input_path: str, upload_base: str, out_bas
         "--openai-model", provider.get("vision_model") or "deepseek-chat",
         "--openai-base-url", provider.get("base_url") or "https://api.deepseek.com/v1",
         "--openai-api-key", provider.get("api_key") or cad_pdf_translator.DEFAULT_API_KEY,
-        "--lang-in", "en",
-        "--lang-out", "zh",
+        "--lang-in", "auto",
+        "--lang-out", target_lang,
         "--no-watermark",
         "--split-short-lines",
         "--translate-table-text",
@@ -566,53 +570,50 @@ def run_doc_task_worker(task_id: str, input_path: str, upload_base: str, out_bas
 
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
-        # BabelDoc 以输入文件名（含 task_id 前缀）命名产物，只认本任务开始后
-        # 生成、且模式后缀匹配的文件，避免捞到同名旧文件或另一版式的产物
+        # BabelDoc 产物名为 {输入主名}.no_watermark.{实际目标语言}.{mono|dual}.pdf。
+        # 语言段按实际输出识别（不写死 .zh.，否则非中文目标翻译成功却找不到产物）；
+        # 只认本任务开始后生成的文件，避免捞到同名旧文件或另一版式的产物；
+        # 命中多份时优先取语言与请求目标一致的那份
+        prefer_suffix = f".no_watermark.{(target_lang or 'zh').lower()}.{out_type}.pdf"
         produced = []
         for f in os.listdir(OUTPUT_DIR):
             fp = os.path.join(OUTPUT_DIR, f)
-            if (f.startswith(upload_base) and f.endswith(f".no_watermark.zh.{out_type}.pdf")
-                    and os.path.isfile(fp) and os.path.getmtime(fp) >= started):
-                produced.append(fp)
+            if (f.startswith(upload_base) and f.endswith(f".{out_type}.pdf")
+                    and ".no_watermark." in f and os.path.isfile(fp)
+                    and os.path.getmtime(fp) >= started):
+                produced.append((0 if f.lower().endswith(prefer_suffix) else 1, f, fp))
+        produced.sort(key=lambda x: (x[0], -os.path.getmtime(x[2])))
 
         if not produced:
             tail = (p.stderr or p.stdout or "").strip()[-400:]
             TASKS[task_id]["status"] = "failed"
             TASKS[task_id]["error"] = f"BabelDoc 退出码 {p.returncode}，未生成输出文件。日志: {tail}"
+            # 同步历史状态，避免记录永远停在"翻译中"
+            update_history(task_id, status="failed", error=TASKS[task_id]["error"])
             return
 
-        # 去掉 task_id 前缀重命名为干净的交付文件名（覆盖旧版本）
-        prefix = f"{task_id}_"
-        final_file = None
-        for fp in produced:
-            clean_path = os.path.join(OUTPUT_DIR, os.path.basename(fp)[len(prefix):])
-            try:
-                os.replace(fp, clean_path)
-            except Exception:
-                clean_path = fp
-            if os.path.basename(fp).endswith(f".no_watermark.zh.{out_type}.pdf"):
-                final_file = clean_path
+        # 重命名为干净的交付文件名：{原始主名}_{语言}{版式}版.pdf（覆盖旧版本）
+        deliver_name = f"{out_base}_{cad_pdf_translator.doc_output_suffix(target_lang, mode)}.pdf"
+        deliver_path = os.path.join(OUTPUT_DIR, deliver_name)
+        try:
+            os.replace(produced[0][2], deliver_path)
+        except Exception:
+            deliver_path = produced[0][2]  # 重命名失败（如目标被占用）时保留原始产物名
 
-        if final_file:
-            TASKS[task_id]["status"] = "completed"
-            TASKS[task_id]["progress"] = 100.0
-            TASKS[task_id]["message"] = "文档排版翻译完成！"
-            TASKS[task_id]["result"] = {"output_pdf": os.path.basename(final_file)}
-            try:
-                doc_pages = len(fitz.open(final_file))
-            except Exception:
-                doc_pages = None
-            update_history(
-                task_id,
-                status="completed",
-                pages=doc_pages,
-                output_pdf=os.path.basename(final_file),
-            )
-        else:
-            tail = (p.stderr or p.stdout or "").strip()[-400:]
-            TASKS[task_id]["status"] = "failed"
-            TASKS[task_id]["error"] = f"执行完成但未定位到 {out_type} 输出。日志: {tail}"
-            update_history(task_id, status="failed", error=TASKS[task_id]["error"])
+        TASKS[task_id]["status"] = "completed"
+        TASKS[task_id]["progress"] = 100.0
+        TASKS[task_id]["message"] = "文档排版翻译完成！"
+        TASKS[task_id]["result"] = {"output_pdf": os.path.basename(deliver_path)}
+        try:
+            doc_pages = len(fitz.open(deliver_path))
+        except Exception:
+            doc_pages = None
+        update_history(
+            task_id,
+            status="completed",
+            pages=doc_pages,
+            output_pdf=os.path.basename(deliver_path),
+        )
     except Exception as e:
         TASKS[task_id]["status"] = "failed"
         TASKS[task_id]["error"] = str(e)
@@ -624,12 +625,15 @@ def run_doc_task_worker(task_id: str, input_path: str, upload_base: str, out_bas
 @app.post("/api/translate/doc")
 async def start_doc_translation(
     file: UploadFile = File(...),
-    mode: Optional[str] = Form("mono")
+    mode: Optional[str] = Form("mono"),
+    target_lang: Optional[str] = Form("zh")
 ):
     task_id = str(uuid.uuid4())[:8]
     clean_name = sanitize_upload_name(file.filename)
     if not clean_name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="请上传 PDF 格式的文档文件")
+    # 语言代码不在支持列表时按中文处理，与 CAD 端点一致
+    target_lang = target_lang if target_lang in cad_pdf_translator.LANG_NAMES else "zh"
 
     prune_old_tasks()
 
@@ -651,15 +655,22 @@ async def start_doc_translation(
         "finished_at": None
     }
 
-    base = os.path.splitext(clean_name)[0]
+    # 主名去掉旧翻译后缀（再翻译旧译文时不叠加后缀）
+    base = cad_pdf_translator.strip_translation_suffix(os.path.splitext(clean_name)[0])
     provider = cad_pdf_translator.get_active_provider() or {}
+    try:
+        file_size = os.path.getsize(save_path)
+    except Exception:
+        file_size = 0
+    # 历史只写一条：创建时 pending，任务线程结束后由 update_history 更新终态
+    # （曾在此处重复 append 第二条且 target_lang 写死 zh，导致同一任务出现两条记录）
     append_history({
         "id": task_id,
         "type": "doc",
         "project_name": base,
         "filename": clean_name,
-        "file_size": os.path.getsize(save_path),
-        "target_lang": "zh",
+        "file_size": file_size,
+        "target_lang": target_lang,
         "engine": provider.get("name"),
         "source_lang": "en",
         "pages": None,
@@ -670,29 +681,10 @@ async def start_doc_translation(
         "total_replaced": None,
         "total_cost": None,
     })
-    t = threading.Thread(target=run_doc_task_worker, args=(task_id, save_path, f"{task_id}_{base}", base, mode, provider))
+    t = threading.Thread(target=run_doc_task_worker, args=(task_id, save_path, f"{task_id}_{base}", base, mode, provider, target_lang))
     t.daemon = True
     t.start()
 
-    try:
-        file_size = os.path.getsize(save_path)
-    except Exception:
-        file_size = 0
-    append_history({
-        "id": task_id,
-        "type": "doc",
-        "project_name": base,
-        "filename": clean_name,
-        "file_size": file_size,
-        "target_lang": "zh",
-        "pages": None,
-        "status": "processing",
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "output_pdf": None,
-        "total_replaced": None,
-        "total_cost": None,
-    })
     return {"task_id": task_id, "status": "pending"}
 
 # ==================== 静态文件下载与预览 ====================

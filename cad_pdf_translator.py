@@ -39,7 +39,63 @@ DEFAULT_OCR_API_URL = ""
 LANG_NAMES = {
     "zh": "简体中文", "zh-TW": "繁体中文", "en": "英语",
     "es": "西班牙语", "fr": "法语", "de": "德语", "it": "意大利语",
+    "ja": "日语", "ko": "韩语", "ru": "俄语", "pt": "葡萄牙语",
+    "vi": "越南语", "th": "泰语", "ar": "阿拉伯语",
+    "id": "印尼语", "tr": "土耳其语",
 }
+
+
+# 文件命名用的语言名：zh 沿用历史习惯「中文」（旧产物为 _专业中文版.pdf），
+# 与 LANG_NAMES（用于翻译 Prompt，zh=简体中文）分开维护
+FILE_LANG_NAMES = dict(LANG_NAMES)
+FILE_LANG_NAMES["zh"] = "中文"
+
+
+def lang_display_name(target_lang):
+    """目标语言文件命名用中文名；未知代码原样返回，空值按中文处理"""
+    return FILE_LANG_NAMES.get(target_lang or "zh", target_lang or "中文")
+
+
+def strip_translation_suffix(base_name):
+    """去掉文件主名尾部由本项目生成的翻译后缀（_专业X版 / _X译文版 / _X双语对照版，
+    以及同名并发防覆盖时插入的 _任务ID 段），避免拿旧译文再翻译时后缀反复叠加。
+    只识别本项目支持的语言名，业务原名即使形似也不动。"""
+    # 剥离集合比生成集合宽：历史产物可能带「简体中文」，一并识别
+    names = set(FILE_LANG_NAMES.values()) | {"简体中文"}
+    suffix_patterns = (r"_专业([^_]+?)版$", r"_([^_]+?)译文版$", r"_([^_]+?)双语对照版$")
+    out = base_name
+    changed = True
+    while changed:
+        changed = False
+        for pat in suffix_patterns:
+            m = re.search(pat, out)
+            if not m:
+                continue
+            inner = m.group(1)
+            if inner.startswith("专业"):  # 如「_专业意大利语双语对照版」按双语模式命中时
+                inner = inner[2:]
+            if inner in names:
+                out = out[:m.start()]
+                changed = True
+                break
+        if changed:
+            continue
+        m = re.search(r"_[0-9a-f]{8}$", out)
+        if m:
+            out = out[:m.start()]
+            changed = True
+    return out
+
+
+def cad_output_suffix(target_lang):
+    """CAD 图纸译文输出后缀：_专业{语言}版"""
+    return f"专业{lang_display_name(target_lang)}版"
+
+
+def doc_output_suffix(target_lang, mode):
+    """常规文档译文输出后缀：_{语言}译文版 / _{语言}双语对照版"""
+    name = lang_display_name(target_lang)
+    return f"{name}双语对照版" if mode == "dual" else f"{name}译文版"
 
 
 def load_config():
@@ -178,6 +234,29 @@ def get_font():
         elif os.path.exists(p):
             return p
     return None
+
+
+# 按目标语言选择回填字体：确保译文字符有字形可用。
+# 一档（完整）：拉丁/西里尔系 + 中日韩；二档（可读但复杂排版不完美）：泰文/阿拉伯文
+_TARGET_FONT_BY_LANG = {
+    "vi": [r"C:\Windows\Fonts\arial.ttf"],   # 越南语音调符号（黑体缺字形）
+    "tr": [r"C:\Windows\Fonts\arial.ttf"],
+    "id": [r"C:\Windows\Fonts\arial.ttf"],
+    "pt": [r"C:\Windows\Fonts\arial.ttf"],
+    "ru": [r"C:\Windows\Fonts\arial.ttf"],   # 西里尔字母
+    "ja": [r"C:\Windows\Fonts\msgothic.ttc", r"C:\Windows\Fonts\YuGothM.ttc"],
+    "ko": [r"C:\Windows\Fonts\malgun.ttf"],
+    "th": [r"C:\Windows\Fonts\tahoma.ttf"],
+    "ar": [r"C:\Windows\Fonts\tahoma.ttf"],
+}
+
+
+def get_font_for_lang(target_lang=None):
+    """按目标语言挑回填字体，找不到专用字体时回退到中文字体链"""
+    for p in _TARGET_FONT_BY_LANG.get(target_lang or "", []):
+        if os.path.exists(p):
+            return p
+    return get_font()
 
 
 # ==================== 文字检测：远程 PaddleOCR 优先，本地 RapidOCR 兜底 ====================
@@ -457,93 +536,67 @@ def is_translatable(text):
         return False
     return True
 
-def translate_batch(texts, cache, stats, provider, target_lang="zh"):
-    """纯文本批量翻译——视觉读图遗漏框的兜底路径。
-    provider 为任务开始时锁定的引擎快照（OpenAI 兼容协议）"""
-    key = provider['api_key']
-    model = provider.get('vision_model') or DEFAULT_MODEL_NAME
-    url = provider['base_url'].rstrip('/') + '/chat/completions'
-    lang_name = LANG_NAMES.get(target_lang, target_lang)
 
-    todo = sorted(list(set(t.strip() for t in texts if is_translatable(t) and t.strip() not in cache)))
-    stats["new_terms"] += len(todo)
-    stats["cache_hits"] += (len(set(t.strip() for t in texts if is_translatable(t))) - len(todo))
-    new_items = {}
+# ==================== 回填排版：宽度估算 / 字号反推 / 自动折行 ====================
+# 旧版把每个字符都按 0.95em 估宽，而拉丁字母/数字实际字形约 0.5em——中→外方向
+# 译文膨胀 3~6 倍时宽度需求被高估近一倍，字号被压到 3pt 蚂蚁字。按字符类别估宽后
+# 拼音文字的宽度需求直接减半，字号立即回升。
+def char_width_em(ch):
+    """单字符宽度估算（单位 em）：CJK/全角 0.95，空格 0.30，拉丁/数字等 0.52"""
+    o = ord(ch)
+    if ch in (' ', '\t'):
+        return 0.30
+    if (0x2E80 <= o <= 0x9FFF                # CJK 部首/符号/假名/汉字
+            or 0xA960 <= o <= 0xA97F or 0xAC00 <= o <= 0xD7FF    # 韩文
+            or 0xF900 <= o <= 0xFAFF or 0xFE30 <= o <= 0xFE4F    # CJK 兼容字形
+            or 0xFF00 <= o <= 0xFF60 or 0x20000 <= o <= 0x2FA1F):  # 全角/扩展汉字
+        return 0.95
+    return 0.52
 
-    if not todo:
-        print("  [兜底翻译] 所有词条均已命中本地缓存，无需调用 API (0 Token 消耗)！")
-        return
 
-    print(f"  [{provider.get('name', '引擎')}/{model}] 兜底文本翻译 {len(todo)} 个词条...")
+def text_width_em(text):
+    """整串文本宽度估算（em）；空串至少按 1 个窄字符计，避免除零"""
+    return max(sum(char_width_em(c) for c in text), 0.52)
 
-    prompt = f"""你是一位资深的酒店家具定制/活动家具深化设计与建筑CAD图纸专家。
-请将输入JSON数组中的图纸标注、图例、材料说明、工艺要求翻译为{lang_name}。
-原文可能是英文、越南语或其他语言（OCR 初读可能丢失音调符号），请先理解原文语义再翻译。
-核心要求：
-1. 术语必须专业地道：
-   - SHOP DRAWINGS -> 深化施工图/加工图（严禁翻译为商店！）
-   - FIXTURE / LIGHT FIXTURE -> 灯具 / 照明器具
-   - RECESSED -> 嵌入式；PENDANT LAMP -> 吊灯；TRACK LIGHT -> 轨道灯
-   - VENEER -> 木饰面（禁止翻译为胶合板）；HARDWARE -> 五金配件
-   - 越南语常见：BAN VE -> 图纸；THI CONG -> 施工；MAT DUNG/MAT CAT -> 立面图/剖面图
-2. 图纸编号、型号代号（如 LUMI 08a、W1、H3）、尺寸单位（mm、mmL）保持原样不改动。
-3. 保持译文精炼紧凑，严禁字数冗长遮挡图线。
-4. 严格返回与输入数组长度完全一致的JSON字符串数组，不要输出任何其他解释文字。"""
 
-    for i in range(0, len(todo), 40):
-        batch = todo[i:i+40]
-        for retry in range(3):
-            try:
-                res = requests.post(url,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": prompt},
-                            {"role": "user", "content": json.dumps(batch, ensure_ascii=False)}
-                        ],
-                        "temperature": 0.1
-                    },
-                    timeout=60
-                )
-                res.raise_for_status()
-                data = res.json()
+def split_two_lines(text):
+    """断成两行：有空白（拼音文字）只在空白处断，无空白（中日文）逐字断。
+    断点取「较长一行」最短的位置（等价于优先空格近中点、无空格按字数均分）。
+    返回 (上行, 下行) 或 None（太短断不了）"""
+    t = text.strip()
+    if len(t) < 2:
+        return None
+    if re.search(r'\s', t):
+        breaks = [m.end() for m in re.finditer(r'\S+\s+', t)]
+    else:
+        breaks = list(range(1, len(t)))
+    if not breaks:
+        return None
 
-                usage = data.get("usage", {})
-                stats["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                stats["completion_tokens"] += usage.get("completion_tokens", 0)
+    def widest(i):
+        return max(text_width_em(t[:i].rstrip()), text_width_em(t[i:].lstrip()))
 
-                content = data["choices"][0]["message"]["content"]
-                match = re.search(r"\[.*\]", content, re.S)
-                if match:
-                    out = json.loads(match.group(0))
-                    if len(out) == len(batch):
-                        for s, d in zip(batch, out):
-                            key_t = s.strip()
-                            zh = str(d).strip()
-                            entry = normalize_entry(cache.get(key_t)) if key_t in cache else {
-                                "zh": zh, "category": "", "count": 0, "updated_at": ""
-                            }
-                            entry["zh"] = zh
-                            entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
-                            cache[key_t] = entry
-                            new_items[key_t] = entry
-                        print(f"  [{model}] 进度: {min(i+40, len(todo))}/{len(todo)}")
-                        break
-            except Exception as e:
-                print(f"  [重试 {retry+1}/3] 接口调用异常: {e}")
-                time.sleep(2)
-        time.sleep(0.3)
+    best = min(breaks, key=widest)
+    return t[:best].rstrip(), t[best:].lstrip()
 
-    if new_items:
-        try:
-            # 只合并本次新译出的词条，避免与并发的词库管理操作互相覆盖
-            save_cache(new_items)
-        except Exception as e:
-            print(f"  [缓存保存异常] {e}")
+
+def layout_backfill(dst, run_len, glyph_len, allow_wrap):
+    """回填排版：反推字号并按需折行，返回 (lines, size)。
+    run_len / glyph_len：文字行进方向 / 字高方向的可用框长度（pt）。
+    - 字号 = min(框高×0.85, 框宽×1.05 ÷ 文本宽度em)
+    - 保底下限 max(框高×0.5, 3.0)：译文再长也不缩到原字高一半以下，宁可持续外溢出
+    - 单行被宽度压到保底下限以下时，折 2 行（行距 1.25×字号）字号更大才采用"""
+    fit = min(glyph_len * 0.85, (run_len * 1.05) / text_width_em(dst))
+    floor = max(glyph_len * 0.5, 3.0)
+    if fit >= floor or not allow_wrap:
+        return [dst], max(fit, floor)
+    pair = split_two_lines(dst)
+    if pair:
+        fit2 = min(glyph_len * 0.85 / 2.5,
+                   (run_len * 1.05) / max(text_width_em(pair[0]), text_width_em(pair[1])))
+        if fit2 > fit and fit2 >= 3.0:
+            return list(pair), fit2
+    return [dst], floor
 
 def parse_page_range(range_str, max_pages):
     """解析页码字符串，如 '18, 22-25, 81' -> [18, 22, 23, 24, 25, 81]
@@ -601,9 +654,10 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
     print(f"输出目标: {output_path}")
     print("=" * 50)
 
-    font_file = get_font()
+    # 回填字体按目标语言选择（日韩用专有字体、越/俄/土等用 Arial，其余回退中文字体链）
+    font_file = get_font_for_lang(target_lang)
     if not font_file:
-        return {"success": False, "error": "未找到可用中文字体(SimHei/微软雅黑)"}
+        return {"success": False, "error": "未找到可用字体（SimHei/微软雅黑/Arial 等）"}
 
     cache = load_cache()
     src_doc = fitz.open(input_path)
@@ -717,6 +771,8 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
                 inner(0.2 + 0.5 * (gi + 1) / len(grids), f"视觉读图翻译 {gi+1}/{len(grids)} 组")
 
         # --- 3) 确定回填内容：企业词库强制优先 ---
+        # 词库键按翻译方向隔离：非中文目标使用 "原文@@目标语言" 后缀键，
+        # 避免中→英与中→日等不同方向的译文互相污染（plain 键仅属于 zh 目标）
         jobs = []
         for bi, b in enumerate(boxes):
             if bi in vlm_results:
@@ -724,50 +780,61 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
             else:
                 original, dst = b['text'], None
             dst = (dst or '').strip()
+            ck = f"{original}@@{target_lang}" if (original and target_lang != 'zh') else original
             # 词库中已有的词条（企业标准译法）强制覆盖模型译文
-            if original and original in cache:
-                cached_v = str(term_zh(cache, original, '')).strip()
+            if ck and ck in cache:
+                cached_v = str(term_zh(cache, ck, '')).strip()
                 if cached_v and cached_v != original:
                     dst = cached_v
             if dst and dst != original and dst != b['text']:
                 # 回填角度 = 页面原始旋转角：所有标注统一按「显示水平正读」写入。
                 # 已弃用 OCR 双向判别——RapidOCR 对倒置文本会内部纠偏，±90 度无法区分，
                 # 曾导致整本输出水平倒置。该规则经像素级模板匹配实验验证（R=270 页实measured）。
-                jobs.append((b['rect'], dst, original, orig_rot))
+                jobs.append((b['rect'], dst, ck, orig_rot))
 
-        # --- 4) 原位擦除回填（按视觉模型判断的原方向书写） ---
+        # --- 4) 原位擦除回填（方向 = 页面原始旋转角，显示水平正读） ---
         ins_count = 0
         if jobs:
             page.insert_font(fontname="cjk", fontfile=font_file)
-            for rect, dst, original, rot in jobs:
+            for rect, dst, ck, rot in jobs:
                 page.add_redact_annot(rect + (-0.5, -0.5, 0.5, 0.5), fill=(1, 1, 1))
             try:
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
             except Exception:
                 page.apply_redactions()
-            for rect, dst, original, rot in jobs:
-                n = max(len(dst), 1)
+            for rect, dst, ck, rot in jobs:
                 # PyMuPDF rotate 为逆时针语义（90=向上书写）；与视觉模型输出的摆正角一致
-                if rot in (90, 270):    # 竖排：字高方向为 rect.width，行进方向为 rect.height
-                    calc_size = max(min(rect.width * 0.85, (rect.height * 1.05) / (n * 0.95)), 3.0)
+                if rot in (90, 270):    # 竖排：字高方向为 rect.width，行进方向为 rect.height；短标签不折行
+                    lines, calc_size = layout_backfill(dst, rect.height, rect.width, allow_wrap=False)
                     if rot == 90:       # 向上书写：字形向右展开，基线靠左缘
-                        pos = (rect.x0 + 0.15 * calc_size, rect.y1)
+                        pos_list = [(rect.x0 + 0.15 * calc_size, rect.y1)]
                     else:               # 向下书写：字形向左展开，基线靠右缘
-                        pos = (rect.x1 - 0.15 * calc_size, rect.y0)
-                elif rot == 180:        # 向左书写：字形向下展开，基线靠顶缘
-                    calc_size = max(min(rect.height * 0.85, (rect.width * 1.05) / (n * 0.95)), 3.0)
-                    pos = (rect.x1, rect.y0 + 0.15 * calc_size)
-                else:                   # 水平向右
-                    calc_size = max(min(rect.height * 0.85, (rect.width * 1.05) / (n * 0.95)), 3.0)
-                    pos = (rect.x0, rect.y1 - 0.15 * calc_size)
+                        pos_list = [(rect.x1 - 0.15 * calc_size, rect.y0)]
+                else:                   # 水平（0/180）：字高方向 rect.height，行进方向 rect.width
+                    lines, calc_size = layout_backfill(dst, rect.width, rect.height, allow_wrap=True)
+                    if len(lines) == 1:
+                        if rot == 180:  # 向左书写：字形向下展开，基线靠顶缘
+                            pos_list = [(rect.x1, rect.y0 + 0.15 * calc_size)]
+                        else:
+                            pos_list = [(rect.x0, rect.y1 - 0.15 * calc_size)]
+                    else:               # 折 2 行：行距 1.25×字号，两行整体在框内纵向居中
+                        gap = 1.25 * calc_size
+                        top = rect.y0 + (rect.height - (gap + calc_size)) / 2
+                        bases = (top + 0.8 * calc_size, top + 0.8 * calc_size + gap)
+                        if rot == 180:  # 180° 视图里靠上的行对应页面坐标 y 较大一侧
+                            mid = rect.y0 + rect.y1
+                            pos_list = [(rect.x1, mid - b) for b in bases]
+                        else:
+                            pos_list = [(rect.x0, b) for b in bases]
                 try:
-                    page.insert_text(pos, dst, fontname="cjk", fontfile=font_file,
-                                     fontsize=calc_size, color=(0, 0, 0), rotate=rot)
+                    for line, pos in zip(lines, pos_list):
+                        page.insert_text(pos, line, fontname="cjk", fontfile=font_file,
+                                         fontsize=calc_size, color=(0, 0, 0), rotate=rot)
                     ins_count += 1
-                    hit_counts[original] = hit_counts.get(original, 0) + 1
-                    if original not in cache:
-                        new_entries[original] = {'zh': dst, 'category': '', 'count': 0,
-                                                 'updated_at': time.strftime('%Y-%m-%d %H:%M')}
+                    hit_counts[ck] = hit_counts.get(ck, 0) + 1
+                    if ck not in cache:
+                        new_entries[ck] = {'zh': dst, 'category': '', 'count': 0,
+                                             'updated_at': time.strftime('%Y-%m-%d %H:%M')}
                 except Exception:
                     pass
             print(f"  - 原图第 {real_pno} 页: 成功原位替换 {ins_count}/{len(boxes)} 项标注")
@@ -861,25 +928,28 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python cad_pdf_translator.py <输入PDF路径> [输出PDF路径] [页码范围如: 18,22,81]")
+        print("用法: python cad_pdf_translator.py <输入PDF路径> [输出PDF路径] [页码范围如: 18,22,81] [目标语言代码如: zh/en/ru]")
         sys.exit(1)
 
     inp = sys.argv[1]
-    pages_arg = None
-    if len(sys.argv) >= 3:
-        if sys.argv[2].replace("-", "").replace(",", "").isdigit() or sys.argv[2] in {"all", "全部"}:
-            pages_arg = sys.argv[2]
-            out = os.path.join(BASE_DIR, "output", f"{os.path.splitext(os.path.basename(inp))[0]}_专业中文版.pdf")
-        else:
-            out = sys.argv[2]
-            if len(sys.argv) >= 4:
-                pages_arg = sys.argv[3]
-    else:
-        out_dir = os.path.join(BASE_DIR, "output")
-        fname = os.path.splitext(os.path.basename(inp))[0]
-        out = os.path.join(out_dir, f"{fname}_专业中文版.pdf")
+    rest = sys.argv[2:]
+    out, pages_arg, target_lang = None, None, "zh"
 
-    res = process_pdf(inp, out, selected_pages=pages_arg)
+    def _is_pages(s):
+        return s in {"all", "全部"} or s.replace("-", "").replace(",", "").isdigit()
+
+    if rest and not _is_pages(rest[0]):
+        out, rest = rest[0], rest[1:]
+    if rest and _is_pages(rest[0]):
+        pages_arg, rest = rest[0], rest[1:]
+    if rest:
+        target_lang = rest[0]
+
+    if out is None:
+        fname = os.path.splitext(os.path.basename(inp))[0]
+        out = os.path.join(BASE_DIR, "output", f"{fname}_{cad_output_suffix(target_lang)}.pdf")
+
+    res = process_pdf(inp, out, selected_pages=pages_arg, target_lang=target_lang)
     if not res.get("success"):
         print(f"[失败] {res.get('error')}")
         sys.exit(1)

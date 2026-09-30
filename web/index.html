@@ -118,11 +118,12 @@
         <p class="hidden lg:block text-[11px] text-slate-300 tracking-[0.35em] whitespace-nowrap">更专业的图纸翻译，助力设计无国界</p>
       </div>
 
-      <!-- 双栏：源文件 + 译文预览 -->
-      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      <!-- 双栏：源文件 + 译文预览（默认伸展对齐，两列卡片底边平齐，预览区弹性吸收高度差） -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
 
         <!-- 左列 -->
-        <div class="lg:col-span-5 space-y-5">
+        <!-- 左列：flex + 末卡 flex-1，右卡更高时设置卡伸展，两列底边对齐 -->
+        <div class="lg:col-span-5 flex flex-col gap-5">
 
           <!-- 源文件卡 -->
           <div class="bg-white border border-lineLight rounded-2xl p-5">
@@ -143,8 +144,8 @@
             </div>
           </div>
 
-          <!-- 翻译设置卡 -->
-          <div class="bg-white border border-lineLight rounded-2xl p-5">
+          <!-- 翻译设置卡：flex-1 随行高伸展，保证与右侧预览卡底边平齐 -->
+          <div class="flex-1 bg-white border border-lineLight rounded-2xl p-5">
             <div class="flex items-center justify-between mb-4">
               <h3 class="text-sm font-bold text-inkTitle">翻译设置</h3>
               <!-- 模式分段切换 -->
@@ -175,11 +176,20 @@
                 <select id="langSelect" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
                   <option value="zh" selected>中文（简体）</option>
                   <option value="zh-TW">中文（繁体）</option>
-                  <option value="en">English</option>
-                  <option value="es">Español</option>
-                  <option value="fr">Français</option>
-                  <option value="de">Deutsch</option>
-                  <option value="it">Italiano</option>
+                  <option value="en">English（英语）</option>
+                  <option value="ja">日本語（日语）</option>
+                  <option value="ko">한국어（韩语）</option>
+                  <option value="vi">Tiếng Việt（越南语）</option>
+                  <option value="ru">Русский（俄语）</option>
+                  <option value="fr">Français（法语）</option>
+                  <option value="de">Deutsch（德语）</option>
+                  <option value="es">Español（西班牙语）</option>
+                  <option value="it">Italiano（意大利语）</option>
+                  <option value="pt">Português（葡萄牙语）</option>
+                  <option value="id">Bahasa Indonesia（印尼语）</option>
+                  <option value="tr">Türkçe（土耳其语）</option>
+                  <option value="th">ไทย（泰语·实验）</option>
+                  <option value="ar">العربية（阿拉伯语·实验）</option>
                 </select>
               </div>
               <div id="pageRangeWrap">
@@ -213,9 +223,9 @@
           </div>
         </div>
 
-        <!-- 右列：译文预览卡 -->
+        <!-- 右列：译文预览卡（h-full 随栅格行高伸展，与左列卡片底边平齐） -->
         <div class="lg:col-span-7">
-          <div class="bg-white border border-lineLight rounded-2xl p-5 flex flex-col min-h-[560px]">
+          <div class="h-full bg-white border border-lineLight rounded-2xl p-5 flex flex-col min-h-[560px]">
             <div class="flex items-center justify-between mb-4">
               <div class="flex items-center gap-2">
                 <h3 class="text-sm font-bold text-inkTitle">译文预览</h3>
@@ -259,9 +269,16 @@
               </div>
             </div>
 
-            <!-- 状态条 -->
-            <div class="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between gap-3">
-              <div class="flex items-center gap-2 min-w-0">
+            <!-- 翻译进度条：翻译中随进度增长；完成瞬间满格转绿后淡出；失败/待命时塌缩隐藏 -->
+            <div id="transProgressWrap" class="mt-0 max-h-0 opacity-0 overflow-hidden transition-all duration-300">
+              <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div id="transProgressFill" class="h-full grad-btn rounded-full transition-all duration-300" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- 状态条：窄屏允许文字与下载按钮分行，避免挤压截断 -->
+            <div class="mt-4 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+              <div class="flex items-center gap-2 min-w-[160px]">
                 <span id="statusDot" class="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
                 <div class="min-w-0">
                   <p id="statusText" class="text-xs font-bold text-inkTitle">准备就绪</p>
@@ -649,7 +666,21 @@
 
     const pdfState = { doc: null, page: 1, total: 0, scale: 1.2 };
 
-    const LANG_NAMES = { 'zh': '中文', 'zh-TW': '中文（繁）', 'en': 'English', 'es': 'Español', 'fr': 'Français', 'de': 'Deutsch', 'it': 'Italiano', 'vi': '越南语', 'th': '泰语', 'ar': '阿拉伯语', 'ja': '日语', 'ko': '韩语', 'ru': '俄语', 'pt': '葡萄牙语' };
+    // ==================== 任务恢复（关闭浏览器后找回进行中/刚结束的任务） ====================
+    // 只存任务 ID 与展示所需元信息，不保存文件内容或密钥；
+    // 任务不存在（服务端已清理）或恢复出终态后清除，避免反复查询失效任务
+    const ACTIVE_TASK_KEY = 'zy_active_task';
+    function saveActiveTask(info) {
+      try { localStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify({ ...info, savedAt: Date.now() })); } catch (e) {}
+    }
+    function clearActiveTask() {
+      try { localStorage.removeItem(ACTIVE_TASK_KEY); } catch (e) {}
+    }
+    function readActiveTask() {
+      try { return JSON.parse(localStorage.getItem(ACTIVE_TASK_KEY) || 'null'); } catch (e) { return null; }
+    }
+
+    const LANG_NAMES = { 'zh': '中文', 'zh-TW': '中文（繁）', 'en': 'English', 'es': 'Español', 'fr': 'Français', 'de': 'Deutsch', 'it': 'Italiano', 'vi': '越南语', 'th': '泰语', 'ar': '阿拉伯语', 'ja': '日语', 'ko': '韩语', 'ru': '俄语', 'pt': '葡萄牙语', 'id': '印尼语', 'tr': '土耳其语' };
     const CATEGORY_STYLES = {
       '家具设计': 'bg-blue-50 text-blue-600 border-blue-100',
       '建筑设计': 'bg-emerald-50 text-emerald-600 border-emerald-100',
@@ -930,11 +961,43 @@
       const btn = $('downloadPdfBtn');
       if (outputPdf) {
         btn.href = `/api/download/${encodeURIComponent(outputPdf)}`;
+        btn.title = outputPdf;  // 悬浮显示完整成果文件名（长文件名界面内截断、不撑破布局）
         btn.classList.remove('opacity-40', 'pointer-events-none');
       } else {
         btn.removeAttribute('href');
+        btn.removeAttribute('title');
         btn.classList.add('opacity-40', 'pointer-events-none');
       }
+    }
+
+    // ==================== 翻译进度条 ====================
+    // 百分比数字仍由状态文案（statusText）承载，进度条只做视觉化，不重复展示数字
+    function showProgress(pct) {
+      const wrap = $('transProgressWrap');
+      const fill = $('transProgressFill');
+      clearTimeout(wrap._hideTimer);
+      fill.classList.remove('bg-emerald-500');   // 复原上一次"完成转绿"
+      fill.classList.add('grad-btn');
+      wrap.classList.remove('mt-0', 'max-h-0', 'opacity-0');
+      wrap.classList.add('mt-4', 'max-h-3', 'opacity-100');
+      fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    }
+
+    function finishProgress() {
+      const wrap = $('transProgressWrap');
+      const fill = $('transProgressFill');
+      clearTimeout(wrap._hideTimer);
+      fill.classList.remove('grad-btn');
+      fill.classList.add('bg-emerald-500');
+      fill.style.width = '100%';
+      wrap._hideTimer = setTimeout(hideProgress, 1500);
+    }
+
+    function hideProgress() {
+      const wrap = $('transProgressWrap');
+      clearTimeout(wrap._hideTimer);
+      wrap.classList.add('mt-0', 'max-h-0', 'opacity-0');
+      wrap.classList.remove('mt-4', 'max-h-3', 'opacity-100');
     }
 
     function applyPreferencesToForm() {
@@ -975,6 +1038,7 @@
           resp = await fetch('/api/translate/cad', { method: 'POST', body: formData });
         } else {
           formData.append('mode', document.querySelector('input[name="docMode"]:checked').value);
+          formData.append('target_lang', $('langSelect').value);  // 文档模式同样使用目标语言选择
           resp = await fetch('/api/translate/doc', { method: 'POST', body: formData });
         }
         if (!resp.ok) {
@@ -989,12 +1053,14 @@
         return;
       }
 
-      // 锁定按钮，进入轮询
+      // 锁定按钮，进入轮询；保存任务信息供浏览器关闭后恢复
       $('startBtn').disabled = true;
       $('startBtn').classList.add('opacity-60', 'cursor-not-allowed');
       setStatus('bg-blue-500', '翻译中 · 0%', '已提交任务，正在排队解析...', true);
+      showProgress(0);
       setDownloadEnabled(null);
       resetPdfPreview();
+      saveActiveTask({ taskId, mode: currentMode, targetLang: $('langSelect').value, fileName: file.name });
 
       pollTask(taskId);
     }
@@ -1012,9 +1078,11 @@
       currentTaskPollInterval = setInterval(async () => {
         attempts++;
         if (attempts > MAX_ATTEMPTS) {
+          // 查询超时但不清理恢复信息：任务可能仍在后台执行，刷新页面可再续查
           clearInterval(currentTaskPollInterval);
           resetStartBtn();
-          setStatus('bg-rose-500', '查询超时', '请稍后在项目记录页查看结果', false);
+          setStatus('bg-rose-500', '查询超时', '请稍后在项目记录页查看结果，或刷新页面尝试恢复跟踪', false);
+          hideProgress();
           return;
         }
         try {
@@ -1033,19 +1101,17 @@
 
           if (task.status === 'processing' || task.status === 'pending') {
             setStatus('bg-blue-500', `翻译中 · ${Math.round(task.progress || 0)}%`, task.message || '', true);
+            showProgress(task.progress || 0);
           } else if (task.status === 'completed') {
-            clearInterval(currentTaskPollInterval);
-            resetStartBtn();
-            const r = task.result || {};
-            setStatus('bg-emerald-500', '翻译完成', `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
-            setDownloadEnabled(r.output_pdf);
-            if (r.output_pdf) loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
-            refreshBalance();
+            applyCompletedTask(task);
+            clearActiveTask();
             toast('翻译完成！');
           } else if (task.status === 'failed') {
             clearInterval(currentTaskPollInterval);
             resetStartBtn();
             setStatus('bg-rose-500', '翻译失败', task.error || '', false);
+            hideProgress();
+            clearActiveTask();
             toast('处理失败: ' + task.error);
           }
         } catch (e) {
@@ -1058,6 +1124,68 @@
           }
         }
       }, 1000);
+    }
+
+    function applyCompletedTask(task) {
+      // 完成态统一渲染：轮询到达、恢复查询、项目记录跳转共用
+      clearInterval(currentTaskPollInterval);
+      resetStartBtn();
+      const r = task.result || {};
+      setStatus('bg-emerald-500', '翻译完成', `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
+      setDownloadEnabled(r.output_pdf);
+      finishProgress();
+      if (r.output_pdf) loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
+      refreshBalance();
+    }
+
+    // ==================== 任务恢复逻辑 ====================
+    function handleTaskSnapshot(task, info) {
+      if (task.status === 'processing' || task.status === 'pending') {
+        // 进行中：恢复按钮锁定、状态条与进度条，并接管轮询继续跟踪
+        $('startBtn').disabled = true;
+        $('startBtn').classList.add('opacity-60', 'cursor-not-allowed');
+        const prefix = info.fileName ? `「${info.fileName}」` : '';
+        setStatus('bg-blue-500', `翻译中 · ${Math.round(task.progress || 0)}%`,
+          `已恢复跟踪${prefix} · ${task.message || ''}`, true);
+        showProgress(task.progress || 0);
+        pollTask(info.taskId);
+      } else if (task.status === 'completed') {
+        applyCompletedTask(task);
+        clearActiveTask();
+      } else if (task.status === 'failed') {
+        clearInterval(currentTaskPollInterval);
+        resetStartBtn();
+        setStatus('bg-rose-500', '翻译失败', task.error || '', false);
+        hideProgress();
+        clearActiveTask();
+      }
+    }
+
+    // 查询任务并按状态接管。返回 {resumed|gone|offline} 供调用方给出提示
+    async function fetchAndHandleTask(taskId, info) {
+      try {
+        const resp = await fetch(`/api/task/${taskId}`);
+        if (resp.status === 404) {
+          // 服务端已清理（结束超 1 小时或服务重启）：清除恢复信息，避免反复查询失效任务
+          clearActiveTask();
+          return { gone: true };
+        }
+        if (!resp.ok) return {};
+        handleTaskSnapshot(await resp.json(), info);
+        return { resumed: true };
+      } catch (e) {
+        // 网络暂时异常：保留恢复信息，下次打开页面自动重试
+        return { offline: true };
+      }
+    }
+
+    async function tryResumeActiveTask() {
+      const info = readActiveTask();
+      if (!info || !info.taskId) return;
+      const res = await fetchAndHandleTask(info.taskId, info);
+      if (res.gone) {
+        toast('上次的翻译任务已被服务端清理（超过 1 小时），可在项目记录中查看成果');
+      }
     }
 
     // ==================== PDF.js 预览 ====================
@@ -1476,7 +1604,8 @@
         tr.className = 'hover:bg-slate-50/70 transition-colors';
 
         const tdName = document.createElement('td');
-        tdName.className = 'px-4 py-3 font-bold text-inkTitle';
+        tdName.className = 'px-4 py-3 font-bold text-inkTitle max-w-[240px] truncate';
+        tdName.title = r.project_name || r.filename || '';
         tdName.textContent = r.project_name || r.filename || '-';
 
         const tdFile = document.createElement('td');
@@ -1550,8 +1679,13 @@
       } else if (r.status === 'failed') {
         toast('该任务翻译失败：' + (r.error || '未知原因'));
       } else {
-        toast('该任务正在进行中，请稍后查看');
-        loadRecords();
+        // 进行中：回到工作台接管进度跟踪（复用任务恢复的同一套查询逻辑）
+        switchPage('workbench');
+        (async () => {
+          const res = await fetchAndHandleTask(r.id, { taskId: r.id, fileName: r.filename, targetLang: r.target_lang });
+          if (res.gone) toast('服务端已无该任务（重启或超时清理），如已生成成果请稍后刷新项目记录');
+          else if (res.offline) toast('网络暂时异常，稍后刷新页面会自动尝试恢复跟踪');
+        })();
       }
     }
 
@@ -1808,6 +1942,7 @@
       applyPreferencesToForm();
       refreshBalance();
       loadEngineOptions();
+      tryResumeActiveTask();  // 上次会话有未完结任务则恢复跟踪（进行中接管轮询/终态展示结果）
     });
   </script>
 </body>
