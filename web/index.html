@@ -1,0 +1,1814 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>资料翻译 · 智能翻译工作台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <!-- PDF.js：前端直接渲染输出的 PDF，实现翻页/缩放/全屏 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { 50: '#eff6ff', 100: '#dbeafe', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' },
+            canvas: '#f7f8fa',
+            lineLight: '#eceef1',
+            inkTitle: '#111827',
+            inkBody: '#374151',
+            inkMuted: '#9ca3af',
+          },
+          fontFamily: {
+            sans: ['"Noto Sans SC"', '-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #f7f8fa; color: #374151; }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #d8dce2; border-radius: 3px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #b9bfc8; }
+    /* 顶部导航选中态：蓝字 + 底部渐变短条 */
+    .nav-btn { position: relative; }
+    .nav-btn.nav-active { color: #2563eb; font-weight: 700; }
+    .nav-btn.nav-active::after {
+      content: ''; position: absolute; left: 50%; transform: translateX(-50%);
+      bottom: 1px; width: 42px; height: 3px; border-radius: 999px;
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+    }
+    .grad-btn { background-image: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
+    .grad-btn:hover { filter: brightness(1.06); }
+    .grad-bar { background-image: linear-gradient(90deg, #3b82f6, #a78bfa); }
+    @keyframes softPulse { 0%,100% { opacity: .85; } 50% { opacity: 1; } }
+    .dot-pulse { animation: softPulse 1.6s infinite ease-in-out; }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    /* 自定义下拉：替代原生 select 的系统弹层，弹层为白底圆角卡片 */
+    .cust-dd select { display: none; }
+    .cust-dd.dd-open .cust-chevron { transform: rotate(180deg); }
+    .cust-chevron { transition: transform .15s ease; }
+  </style>
+</head>
+<body class="font-sans antialiased min-h-screen flex flex-col">
+
+  <!-- ==================== 顶部导航栏 ==================== -->
+  <header class="sticky top-0 z-40 bg-white/90 backdrop-blur-xl border-b border-lineLight">
+    <div class="max-w-[1280px] mx-auto px-6 h-16 flex items-center justify-between">
+
+      <!-- 品牌 -->
+      <div class="flex items-center gap-2.5 shrink-0">
+        <div class="w-8 h-8 rounded-[10px] grad-btn flex items-center justify-center text-white shadow-md shadow-blue-500/20">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6"/><path d="M9 11h6"/></svg>
+        </div>
+        <span class="text-[15px] font-black text-inkTitle whitespace-nowrap">资料翻译</span>
+        <span class="w-px h-4 bg-slate-200 mx-1"></span>
+        <span class="text-xs text-inkMuted whitespace-nowrap hidden lg:block">CAD 图纸 · 文档智能翻译</span>
+      </div>
+
+      <!-- 主导航 -->
+      <nav class="flex items-center gap-1 sm:gap-6 h-full">
+        <button onclick="switchPage('workbench')" id="navBtn-workbench" class="nav-btn nav-active h-full px-1 sm:px-2 text-sm text-inkBody hover:text-primary-600 transition-colors whitespace-nowrap">翻译工作台</button>
+        <button onclick="switchPage('terms')" id="navBtn-terms" class="nav-btn h-full px-1 sm:px-2 text-sm text-inkBody hover:text-primary-600 transition-colors whitespace-nowrap">术语库</button>
+        <button onclick="switchPage('records')" id="navBtn-records" class="nav-btn h-full px-1 sm:px-2 text-sm text-inkBody hover:text-primary-600 transition-colors whitespace-nowrap">项目记录</button>
+      </nav>
+
+      <!-- 右侧：余额 + 设置齿轮 -->
+      <div class="flex items-center gap-2 shrink-0">
+        <div class="flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 bg-slate-50 border border-lineLight rounded-full text-xs whitespace-nowrap">
+          <svg class="w-3.5 h-3.5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v12"/><path d="M15 9.5c0-1.4-1.3-2.5-3-2.5s-3 1.1-3 2.5 1.3 2.5 3 2.5 3 1.1 3 2.5-1.3 2.5-3 2.5-3-1.1-3-2.5"/></svg>
+          <span id="headerBalance" class="font-mono font-medium text-inkTitle">￥ --</span>
+          <a href="https://platform.deepseek.com/" target="_blank" title="前往 DeepSeek 充值"
+             class="w-5 h-5 rounded-full grad-btn text-white flex items-center justify-center hover:opacity-90 transition-opacity">
+            <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          </a>
+        </div>
+        <button onclick="switchPage('settings')" id="navBtn-settings" title="设置"
+                class="w-9 h-9 rounded-full border border-lineLight bg-white flex items-center justify-center text-slate-500 hover:text-primary-600 hover:border-blue-200 transition-colors">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <main class="flex-1 w-full max-w-[1280px] mx-auto px-6 py-8">
+
+    <!-- ============================================================ -->
+    <!-- 页面 1：翻译工作台                                            -->
+    <!-- ============================================================ -->
+    <section id="page-workbench">
+
+      <!-- Hero 标题区 -->
+      <div class="flex items-end justify-between mb-8">
+        <div>
+          <h1 class="text-3xl font-black text-inkTitle tracking-tight flex items-center gap-4">
+            让每一张图纸，跨越语言边界
+            <span class="hidden md:inline-block grad-bar w-20 h-2 rounded-full"></span>
+          </h1>
+          <p class="text-sm text-inkMuted mt-3">上传 CAD 导出的 PDF，保留版式与专业术语。</p>
+        </div>
+        <p class="hidden lg:block text-[11px] text-slate-300 tracking-[0.35em] whitespace-nowrap">更专业的图纸翻译，助力设计无国界</p>
+      </div>
+
+      <!-- 双栏：源文件 + 译文预览 -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+
+        <!-- 左列 -->
+        <div class="lg:col-span-5 space-y-5">
+
+          <!-- 源文件卡 -->
+          <div class="bg-white border border-lineLight rounded-2xl p-5">
+            <div class="mb-4">
+              <h3 class="text-sm font-bold text-inkTitle">源文件</h3>
+              <p class="text-xs text-inkMuted mt-0.5">上传 CAD 导出的 PDF 文件</p>
+            </div>
+            <div id="dropzone" onclick="document.getElementById('fileInput').click()"
+                 ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)"
+                 class="border-2 border-dashed border-blue-200 bg-blue-50/30 hover:bg-blue-50/60 rounded-2xl py-9 px-4 text-center cursor-pointer transition-all group">
+              <input type="file" id="fileInput" accept=".pdf" class="hidden" onchange="handleFileSelect(event)">
+              <div id="fileIconWrap" class="w-12 h-12 mx-auto rounded-xl bg-white border border-blue-100 flex items-center justify-center text-primary-500 shadow-sm group-hover:scale-105 transition-transform">
+                <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>
+              </div>
+              <p class="mt-3.5 text-sm font-bold text-inkTitle" id="fileNameDisplay">拖入或选择 CAD PDF</p>
+              <p class="mt-1 text-xs text-inkMuted" id="fileSizeDisplay">支持多页 PDF · 自动识别专业术语</p>
+              <button type="button" id="fileSelectBtn" class="mt-4 px-5 py-1.5 bg-white border border-blue-200 text-primary-600 text-xs font-medium rounded-full hover:bg-blue-50 transition-colors pointer-events-none">选择文件</button>
+            </div>
+          </div>
+
+          <!-- 翻译设置卡 -->
+          <div class="bg-white border border-lineLight rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-bold text-inkTitle">翻译设置</h3>
+              <!-- 模式分段切换 -->
+              <div class="flex items-center p-0.5 bg-slate-100 rounded-full text-xs">
+                <button id="modeBtn-cad" onclick="setMode('cad')" class="px-3 py-1 rounded-full bg-white shadow-sm text-primary-600 font-medium transition-all whitespace-nowrap">CAD 图纸</button>
+                <button id="modeBtn-doc" onclick="setMode('doc')" class="px-3 py-1 rounded-full text-slate-500 transition-all whitespace-nowrap">说明书画册</button>
+              </div>
+            </div>
+
+            <!-- 文档模式：输出版式 -->
+            <div id="docOptions" class="hidden mb-4">
+              <label class="block text-xs text-inkBody mb-1.5">输出版式</label>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="flex items-center justify-center gap-2 p-2.5 border border-slate-200 rounded-xl cursor-pointer has-checked:border-blue-400 has-checked:bg-blue-50/40 transition-all">
+                  <input type="radio" name="docMode" value="mono" checked class="accent-blue-600">
+                  <span class="text-xs text-inkBody">纯中文译文版</span>
+                </label>
+                <label class="flex items-center justify-center gap-2 p-2.5 border border-slate-200 rounded-xl cursor-pointer has-checked:border-blue-400 has-checked:bg-blue-50/40 transition-all">
+                  <input type="radio" name="docMode" value="dual" class="accent-blue-600">
+                  <span class="text-xs text-inkBody">中英双语对照</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs text-inkBody mb-1.5">目标语言</label>
+                <select id="langSelect" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+                  <option value="zh" selected>中文（简体）</option>
+                  <option value="zh-TW">中文（繁体）</option>
+                  <option value="en">English</option>
+                  <option value="es">Español</option>
+                  <option value="fr">Français</option>
+                  <option value="de">Deutsch</option>
+                  <option value="it">Italiano</option>
+                </select>
+              </div>
+              <div id="pageRangeWrap">
+                <label class="block text-xs text-inkBody mb-1.5">页面范围</label>
+                <input type="text" id="pageRangeInput" placeholder="全部页面"
+                       class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle placeholder-inkMuted focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+              </div>
+            </div>
+
+            <!-- 高级选项：引擎 -->
+            <details class="mt-4 group">
+              <summary class="inline-flex items-center gap-1 text-xs text-inkMuted hover:text-inkBody cursor-pointer select-none">
+                <svg class="w-3 h-3 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+                高级选项
+              </summary>
+              <div class="mt-3">
+                <label class="block text-xs text-inkBody mb-1.5">翻译引擎（多模态，读图+翻译）</label>
+                <select id="modelSelect" onchange="switchEngine(this.value)" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+                  <option value="">加载中...</option>
+                </select>
+                <p class="text-[10px] text-inkMuted mt-1">切换引擎会自动验证识图能力；进行中的任务不受影响。</p>
+              </div>
+            </details>
+
+            <!-- 开始翻译 -->
+            <button id="startBtn" onclick="submitTranslation()"
+                    class="grad-btn w-full mt-5 py-3.5 rounded-xl text-white text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 transition-all">
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.8 4.8 2.6 6.6 7.5 7.4-4.9.8-6.7 2.6-7.5 7.4-.8-4.8-2.6-6.6-7.5-7.4C9.4 8.6 11.2 6.8 12 2z"/><path d="M19 14.5c.4 2.2 1.2 3 3.4 3.4-2.2.4-3 1.2-3.4 3.4-.4-2.2-1.2-3-3.4-3.4 2.2-.4 3-1.2 3.4-3.4z"/></svg>
+              <span id="startBtnText">开始翻译</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 右列：译文预览卡 -->
+        <div class="lg:col-span-7">
+          <div class="bg-white border border-lineLight rounded-2xl p-5 flex flex-col min-h-[560px]">
+            <div class="flex items-center justify-between mb-4">
+              <div class="flex items-center gap-2">
+                <h3 class="text-sm font-bold text-inkTitle">译文预览</h3>
+                <span class="text-[10px] px-2 py-0.5 rounded-full bg-violet-50 text-violet-500 border border-violet-100">实时预览</span>
+              </div>
+              <span class="text-[11px] text-slate-300 hidden sm:block">高清渲染 · 专业术语翻译</span>
+            </div>
+
+            <!-- 预览主体 -->
+            <div id="previewStage" class="flex-1 rounded-xl border border-lineLight bg-slate-50/50 relative overflow-hidden min-h-[380px] flex flex-col">
+              <!-- 空状态 -->
+              <div id="previewEmpty" class="flex-1 flex flex-col items-center justify-center text-center p-6">
+                <div class="w-14 h-14 rounded-2xl bg-white border border-lineLight flex items-center justify-center text-slate-300 shadow-sm">
+                  <svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+                </div>
+                <p class="mt-4 text-sm text-inkMuted">上传文件后将自动生成译文预览</p>
+                <p class="mt-1 text-xs text-slate-300">支持翻页 · 缩放 · 全屏查看</p>
+              </div>
+              <!-- PDF 画布 -->
+              <div id="pdfWrap" class="hidden absolute inset-0 overflow-auto custom-scrollbar bg-slate-100/60 flex items-start justify-center p-4">
+                <canvas id="pdfCanvas" class="shadow-md rounded bg-white max-w-full"></canvas>
+              </div>
+            </div>
+
+            <!-- 控制条：分页 / 缩放 / 全屏 -->
+            <div id="pdfControls" class="hidden mt-3 flex items-center justify-between text-xs text-inkBody">
+              <div class="flex items-center gap-1 bg-slate-50 border border-lineLight rounded-full px-1 py-0.5">
+                <button onclick="pdfPrev()" class="w-7 h-7 rounded-full hover:bg-white flex items-center justify-center text-slate-500 disabled:opacity-30" id="btnPrev"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
+                <span class="px-2 font-mono" id="pageIndicator">1 / 1</span>
+                <button onclick="pdfNext()" class="w-7 h-7 rounded-full hover:bg-white flex items-center justify-center text-slate-500 disabled:opacity-30" id="btnNext"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg></button>
+              </div>
+              <div class="flex items-center gap-2">
+                <div class="flex items-center gap-1 bg-slate-50 border border-lineLight rounded-full px-1 py-0.5">
+                  <button onclick="pdfZoom(-0.2)" class="w-7 h-7 rounded-full hover:bg-white flex items-center justify-center text-slate-500"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+                  <span class="px-1.5 font-mono w-12 text-center" id="zoomIndicator">100%</span>
+                  <button onclick="pdfZoom(0.2)" class="w-7 h-7 rounded-full hover:bg-white flex items-center justify-center text-slate-500"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg></button>
+                </div>
+                <button onclick="pdfFullscreen()" title="全屏查看" class="w-8 h-8 rounded-full bg-slate-50 border border-lineLight flex items-center justify-center text-slate-500 hover:text-primary-600 transition-colors">
+                  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <!-- 状态条 -->
+            <div class="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span id="statusDot" class="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+                <div class="min-w-0">
+                  <p id="statusText" class="text-xs font-bold text-inkTitle">准备就绪</p>
+                  <p id="statusSubText" class="text-[11px] text-inkMuted truncate">上传文件后将自动生成译文预览</p>
+                </div>
+              </div>
+              <a id="downloadPdfBtn" href="#" target="_blank" download
+                 class="shrink-0 px-4 py-2 bg-white border border-blue-200 text-primary-600 text-xs font-medium rounded-xl flex items-center gap-1.5 hover:bg-blue-50 transition-colors opacity-40 pointer-events-none">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                下载译文 PDF
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部特性条 -->
+      <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="flex items-start gap-3 px-2 py-3">
+          <div class="w-9 h-9 rounded-full bg-blue-50 text-primary-500 flex items-center justify-center shrink-0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.2-2.6 5.6-.7.7-1.4 1.6-1.4 2.4v1a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-1c0-.8-.7-1.7-1.4-2.4C6.2 13.2 5 11.4 5 9a7 7 0 0 1 7-7z"/><path d="M9 21h6"/></svg>
+          </div>
+          <div>
+            <p class="text-xs font-bold text-inkTitle">专业术语识别</p>
+            <p class="text-[11px] text-inkMuted mt-1 leading-relaxed">内置家具与建筑深化词库，自动识别图纸专业词汇，命中自动沉淀复用</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3 px-2 py-3 md:border-l md:border-lineLight">
+          <div class="w-9 h-9 rounded-full bg-blue-50 text-primary-500 flex items-center justify-center shrink-0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+          </div>
+          <div>
+            <p class="text-xs font-bold text-inkTitle">原图版式还原</p>
+            <p class="text-[11px] text-inkMuted mt-1 leading-relaxed">1:1 原位擦除回填，图纸几何线条、标注与排版完整保留</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3 px-2 py-3 md:border-l md:border-lineLight">
+          <div class="w-9 h-9 rounded-full bg-blue-50 text-primary-500 flex items-center justify-center shrink-0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
+          <div>
+            <p class="text-xs font-bold text-inkTitle">多语言输出</p>
+            <p class="text-[11px] text-inkMuted mt-1 leading-relaxed">支持中、英、西、法、德、意等多语言，满足全球项目协作需求</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- 页面 2：术语库                                                -->
+    <!-- ============================================================ -->
+    <section id="page-terms" class="hidden">
+      <div class="mb-6">
+        <h1 class="text-2xl font-black text-inkTitle tracking-tight">术语库</h1>
+        <p class="text-sm text-inkMuted mt-2">统一管理专业词汇，让每一次翻译都更准确</p>
+      </div>
+
+      <div class="bg-white border border-lineLight rounded-2xl flex overflow-hidden min-h-[560px]">
+        <!-- 左侧分类侧栏 -->
+        <div class="w-52 shrink-0 border-r border-slate-100 p-3 flex flex-col">
+          <div id="categoryList" class="space-y-1 flex-1">
+            <!-- 动态渲染 -->
+          </div>
+          <button onclick="openTermModal()" class="grad-btn w-full mt-3 py-2.5 rounded-xl text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/20">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
+            新建词条
+          </button>
+        </div>
+
+        <!-- 右侧主区 -->
+        <div class="flex-1 p-5 flex flex-col min-w-0">
+          <div class="flex items-center gap-3 mb-4 flex-wrap">
+            <div class="relative flex-1 min-w-[200px] max-w-xs">
+              <svg class="w-4 h-4 text-slate-300 absolute left-3 top-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="termSearchInput" oninput="onTermSearch()" placeholder="搜索术语、译文或分类"
+                     class="w-full bg-slate-50/60 border border-lineLight rounded-xl pl-9 pr-3 py-2 text-xs text-inkTitle placeholder-inkMuted focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+            </div>
+            <div class="flex items-center gap-2 ml-auto">
+              <input type="file" id="importFileInput" accept=".json,.csv" class="hidden" onchange="handleImportFile(event)">
+              <button onclick="document.getElementById('importFileInput').click()" class="px-3.5 py-2 bg-white border border-lineLight text-inkBody text-xs rounded-xl flex items-center gap-1.5 hover:border-blue-300 hover:text-primary-600 transition-colors">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                导入术语
+              </button>
+              <button onclick="exportTerms('json')" class="px-3.5 py-2 bg-white border border-lineLight text-inkBody text-xs rounded-xl flex items-center gap-1.5 hover:border-blue-300 hover:text-primary-600 transition-colors">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                导出库
+              </button>
+              <button onclick="exportTerms('csv')" class="px-3.5 py-2 bg-white border border-lineLight text-inkBody text-xs rounded-xl flex items-center gap-1.5 hover:border-blue-300 hover:text-primary-600 transition-colors">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                导出 CSV
+              </button>
+            </div>
+          </div>
+
+          <!-- 批量操作条 -->
+          <div id="batchBar" class="hidden mb-3 items-center gap-3 text-xs">
+            <span class="text-inkMuted">已选 <b id="selectedCount" class="text-primary-600">0</b> 条</span>
+            <button onclick="deleteSelectedTerms()" class="px-3 py-1.5 bg-rose-50 border border-rose-100 text-rose-600 rounded-lg font-medium hover:bg-rose-100 transition-colors">删除选中</button>
+            <button onclick="clearTermSelection()" class="text-inkMuted hover:text-inkBody">取消选择</button>
+          </div>
+
+          <!-- 表格 -->
+          <div class="flex-1 overflow-auto custom-scrollbar border border-slate-100 rounded-xl">
+            <table class="w-full text-left text-xs min-w-[640px]">
+              <thead class="bg-slate-50/80 text-slate-500 sticky top-0">
+                <tr class="border-b border-slate-100">
+                  <th class="px-4 py-3 w-10"><input type="checkbox" id="checkAll" onchange="toggleCheckAll(this)" class="accent-blue-600 rounded"></th>
+                  <th class="px-4 py-3 font-medium">英文原文</th>
+                  <th class="px-4 py-3 font-medium">中文译文</th>
+                  <th class="px-4 py-3 font-medium">分类</th>
+                  <th class="px-4 py-3 font-medium w-20">使用次数</th>
+                  <th class="px-4 py-3 font-medium w-32">更新时间</th>
+                  <th class="px-4 py-3 font-medium text-right w-20">操作</th>
+                </tr>
+              </thead>
+              <tbody id="termsTableBody" class="divide-y divide-slate-50">
+                <!-- 动态渲染 -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 分页 -->
+          <div class="mt-3 flex items-center justify-between text-xs text-inkMuted">
+            <span id="termsCountDisplay">共 0 条记录</span>
+            <div class="flex items-center gap-1">
+              <button onclick="termPageMove(-1)" id="termPagePrev" class="w-7 h-7 rounded-lg border border-lineLight bg-white flex items-center justify-center hover:border-blue-300 disabled:opacity-30" disabled><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
+              <span id="termPageIndicator" class="px-3 font-mono">1 / 1</span>
+              <button onclick="termPageMove(1)" id="termPageNext" class="w-7 h-7 rounded-lg border border-lineLight bg-white flex items-center justify-center hover:border-blue-300 disabled:opacity-30" disabled><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- 页面 3：项目记录                                              -->
+    <!-- ============================================================ -->
+    <section id="page-records" class="hidden">
+      <div class="mb-6">
+        <h1 class="text-2xl font-black text-inkTitle tracking-tight">项目记录</h1>
+        <p class="text-sm text-inkMuted mt-2">查看和管理你处理过的所有翻译项目</p>
+      </div>
+
+      <div class="bg-white border border-lineLight rounded-2xl p-5">
+        <div class="flex items-center gap-3 mb-4 flex-wrap">
+          <div class="relative flex-1 min-w-[200px] max-w-xs">
+            <svg class="w-4 h-4 text-slate-300 absolute left-3 top-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="recordSearchInput" oninput="onRecordSearch()" placeholder="搜索项目名称或文件名"
+                   class="w-full bg-slate-50/60 border border-lineLight rounded-xl pl-9 pr-3 py-2 text-xs text-inkTitle placeholder-inkMuted focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+          </div>
+          <div class="flex items-center p-0.5 bg-slate-100 rounded-full text-xs" id="recordFilterChips">
+            <button onclick="setRecordFilter('all')" class="record-chip px-3 py-1 rounded-full bg-white shadow-sm text-primary-600 font-medium transition-all">全部</button>
+            <button onclick="setRecordFilter('processing')" class="record-chip px-3 py-1 rounded-full text-slate-500 transition-all">进行中</button>
+            <button onclick="setRecordFilter('completed')" class="record-chip px-3 py-1 rounded-full text-slate-500 transition-all">已完成</button>
+            <button onclick="setRecordFilter('failed')" class="record-chip px-3 py-1 rounded-full text-slate-500 transition-all">失败</button>
+          </div>
+          <button onclick="switchPage('workbench')" class="ml-auto grad-btn px-4 py-2 rounded-xl text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-500/20">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            新建翻译
+          </button>
+        </div>
+
+        <div class="overflow-auto custom-scrollbar border border-slate-100 rounded-xl">
+          <table class="w-full text-left text-xs min-w-[760px]">
+            <thead class="bg-slate-50/80 text-slate-500">
+              <tr class="border-b border-slate-100">
+                <th class="px-4 py-3 font-medium">项目名称</th>
+                <th class="px-4 py-3 font-medium">源文件</th>
+                <th class="px-4 py-3 font-medium w-32">语言</th>
+                <th class="px-4 py-3 font-medium w-16">页数</th>
+                <th class="px-4 py-3 font-medium w-24">状态</th>
+                <th class="px-4 py-3 font-medium w-36">更新时间</th>
+                <th class="px-4 py-3 font-medium text-right w-36">操作</th>
+              </tr>
+            </thead>
+            <tbody id="recordsTableBody" class="divide-y divide-slate-50">
+              <!-- 动态渲染 -->
+            </tbody>
+          </table>
+        </div>
+        <div class="mt-3 flex items-center justify-between text-xs text-inkMuted">
+          <span id="recordsCountDisplay">共 0 条记录</span>
+          <button onclick="loadRecords()" class="flex items-center gap-1 hover:text-primary-600 transition-colors">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            刷新
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- 页面 4：设置（齿轮入口）                                       -->
+    <!-- ============================================================ -->
+    <section id="page-settings" class="hidden">
+      <div class="mb-6">
+        <h1 class="text-2xl font-black text-inkTitle tracking-tight">设置</h1>
+        <p class="text-sm text-inkMuted mt-2">管理你的偏好与翻译工作流</p>
+      </div>
+
+      <div class="flex gap-6 items-start">
+        <!-- 侧栏 -->
+        <div class="w-48 shrink-0 bg-white border border-lineLight rounded-2xl p-2 space-y-1">
+          <button onclick="setSettingsSection('engines')" id="setSecBtn-engines" class="settings-sec w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-medium bg-blue-50 text-primary-600 transition-all">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            翻译引擎
+          </button>
+          <button onclick="setSettingsSection('api')" id="setSecBtn-api" class="settings-sec w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-medium text-inkBody hover:bg-slate-50 transition-all">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            账单与余额
+          </button>
+          <button onclick="setSettingsSection('lan')" id="setSecBtn-lan" class="settings-sec w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-medium text-inkBody hover:bg-slate-50 transition-all">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            局域网共享
+          </button>
+        </div>
+
+        <!-- 内容区 -->
+        <div class="flex-1 space-y-5 min-w-0">
+          <!-- 翻译引擎管理 -->
+          <div id="setSec-engines" class="bg-white border border-lineLight rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-1.5">
+              <h3 class="text-sm font-bold text-inkTitle">翻译引擎</h3>
+              <button onclick="openEngineModal()" class="grad-btn px-4 py-2 rounded-xl text-white text-xs font-bold shadow-md shadow-blue-500/20 flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                接入新引擎
+              </button>
+            </div>
+            <p class="text-[11px] text-inkMuted mb-4 leading-relaxed">支持任何 OpenAI 兼容接口的多模态模型。启用前会自动发一张测试图验证识图能力——读不出图的模型（纯文本）无法被启用，杜绝切错引擎后任务全废。</p>
+            <div id="engineList" class="space-y-3">
+              <!-- 动态渲染 -->
+            </div>
+          </div>
+
+          <!-- 账单与余额 -->
+          <div id="setSec-api" class="hidden bg-white border border-lineLight rounded-2xl p-6 space-y-5">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-bold text-inkTitle">DeepSeek 账户</h3>
+                <button onclick="refreshBalance()" class="text-xs text-primary-600 hover:underline flex items-center gap-1">
+                  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  刷新余额
+                </button>
+              </div>
+              <div class="flex items-end gap-6">
+                <div>
+                  <p class="text-[11px] text-inkMuted mb-1">实时可用余额</p>
+                  <p class="text-3xl font-black text-inkTitle font-mono" id="settingsBalanceValue">￥ --</p>
+                </div>
+                <div class="pb-1">
+                  <p class="text-[11px] text-inkMuted mb-1">历史任务 / 累计消耗</p>
+                  <p class="text-sm font-bold text-inkTitle" id="usageSummary">- 个任务 · 约 ￥--</p>
+                </div>
+              </div>
+              <p class="text-[11px] text-inkMuted mt-3">余额仅对配置了余额查询接口的引擎显示（当前仅 DeepSeek 官方接口支持）；密钥修改请到「翻译引擎」里编辑对应引擎。</p>
+            </div>
+          </div>
+
+          <!-- 局域网共享 -->
+          <div id="setSec-lan" class="hidden bg-white border border-lineLight rounded-2xl p-6">
+            <h3 class="text-sm font-bold text-inkTitle mb-2">全公司局域网免安装协同</h3>
+            <p class="text-xs text-inkMuted leading-relaxed mb-4">同一办公室或 Wi-Fi 下的同事，在浏览器直接打开以下网址即可使用，无需安装任何软件。</p>
+            <div class="flex items-center justify-between gap-3 bg-slate-50 border border-lineLight rounded-xl px-4 py-3">
+              <span id="fullLanUrl" class="font-mono text-xs text-primary-600">http://你的局域网IP:7860</span>
+              <button onclick="copyLanIp()" class="px-3 py-1.5 bg-white border border-lineLight hover:border-blue-300 text-slate-600 rounded-full text-xs transition-colors shrink-0">复制链接</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==================== 新建/编辑词条弹窗 ==================== -->
+  <div id="termModal" class="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-white border border-slate-100 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+        <h3 class="text-sm font-bold text-inkTitle" id="termModalTitle">新建词条</h3>
+        <button onclick="closeTermModal()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">英文原文</label>
+          <input type="text" id="modalEnInput" placeholder="如: Soft-close undermount slide" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">中文译文</label>
+          <input type="text" id="modalZhInput" placeholder="如: 阻尼缓冲托底滑轨" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">分类（可选）</label>
+          <input type="text" id="modalCategoryInput" list="categorySuggestions" placeholder="选择或输入分类"
+                 class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+          <datalist id="categorySuggestions">
+            <option value="家具设计"></option>
+            <option value="建筑设计"></option>
+            <option value="机电照明"></option>
+            <option value="五金材料"></option>
+            <option value="其他"></option>
+          </datalist>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeTermModal()" class="px-4 py-2 text-xs text-slate-500 hover:text-slate-800">取消</button>
+        <button onclick="confirmTermModal()" class="grad-btn px-5 py-2 rounded-xl text-white text-xs font-bold shadow-md shadow-blue-500/20">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 接入/编辑引擎弹窗 ==================== -->
+  <div id="engineModal" class="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-white border border-slate-100 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-auto custom-scrollbar">
+      <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+        <h3 class="text-sm font-bold text-inkTitle" id="engineModalTitle">接入新引擎</h3>
+        <button onclick="closeEngineModal()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-inkBody mb-1">引擎名称 *</label>
+            <input type="text" id="engNameInput" placeholder="如: DeepSeek / 智谱 / 硅基流动" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-inkBody mb-1">引擎 ID（唯一标识）*</label>
+            <input type="text" id="engIdInput" placeholder="如: deepseek / zhipu" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs font-mono text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">接口地址（OpenAI 兼容，到根路径）*</label>
+          <input type="text" id="engBaseUrlInput" placeholder="如: https://api.deepseek.com" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs font-mono text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">API 密钥 *（编辑时留空表示沿用原密钥）</label>
+          <input type="password" id="engApiKeyInput" placeholder="sk-..." class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs font-mono text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">视觉模型名 *（必须支持图片输入，启用时自动验图）</label>
+          <input type="text" id="engModelInput" placeholder="如: deepseek-chat / glm-4v-flash / qwen-vl-plus" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs font-mono text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-inkBody mb-1">输入单价（元/百万 Token，可选）</label>
+            <input type="number" step="0.1" min="0" id="engPriceInInput" placeholder="如: 1.0" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-inkBody mb-1">输出单价（元/百万 Token，可选）</label>
+            <input type="number" step="0.1" min="0" id="engPriceOutInput" placeholder="如: 2.0" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">余额查询地址（可选，仅 DeepSeek 官方格式）</label>
+          <input type="text" id="engBalanceUrlInput" placeholder="https://api.deepseek.com/user/balance" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs font-mono text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <p id="engineModalStatus" class="text-xs"></p>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeEngineModal()" class="px-4 py-2 text-xs text-slate-500 hover:text-slate-800">取消</button>
+        <button onclick="confirmEngineModal()" class="grad-btn px-5 py-2 rounded-xl text-white text-xs font-bold shadow-md shadow-blue-500/20">保存引擎</button>
+        <button onclick="confirmEngineModal(true)" id="engineSaveActivateBtn" class="px-5 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-900 text-white transition-colors hidden">保存并启用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 轻量 Toast -->
+  <div id="toast" class="fixed bottom-6 right-6 bg-slate-900 text-white text-xs px-4 py-2.5 rounded-full shadow-xl transition-all duration-300 opacity-0 pointer-events-none transform translate-y-2">
+    提示信息
+  </div>
+
+  <!-- ==================== 交互脚本 ==================== -->
+  <script>
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+
+    // ==================== 全局状态 ====================
+    const $ = id => document.getElementById(id);
+    let currentMode = 'cad';
+    let currentTaskPollInterval = null;
+    let cachedTerms = [];          // 全量词条 [{en, zh, category, count, updated_at}]
+    let termFilterCategory = '';   // '' = 全部术语
+    let termPage = 1;
+    const TERM_PAGE_SIZE = 10;
+    let selectedTerms = new Set();
+    let recordFilter = 'all';
+    let recordSearchTimer = null;
+    let termSearchTimer = null;
+
+    const pdfState = { doc: null, page: 1, total: 0, scale: 1.2 };
+
+    const LANG_NAMES = { 'zh': '中文', 'zh-TW': '中文（繁）', 'en': 'English', 'es': 'Español', 'fr': 'Français', 'de': 'Deutsch', 'it': 'Italiano', 'vi': '越南语', 'th': '泰语', 'ar': '阿拉伯语', 'ja': '日语', 'ko': '韩语', 'ru': '俄语', 'pt': '葡萄牙语' };
+    const CATEGORY_STYLES = {
+      '家具设计': 'bg-blue-50 text-blue-600 border-blue-100',
+      '建筑设计': 'bg-emerald-50 text-emerald-600 border-emerald-100',
+      '机电照明': 'bg-violet-50 text-violet-600 border-violet-100',
+      '五金材料': 'bg-amber-50 text-amber-600 border-amber-100',
+    };
+    const CATEGORY_ICONS = {
+      '全部术语': '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/>',
+      '家具设计': '<path d="M6 19v-3"/><path d="M18 19v-3"/><path d="M4 11h16"/><path d="M5 11V8a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/><path d="M4 11v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+      '建筑设计': '<path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 21v-6h6v6"/>',
+      '机电照明': '<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>',
+      '五金材料': '<circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="M2 12h3"/><path d="M19 12h3"/><path d="m4.9 4.9 2.2 2.2"/><path d="m16.9 16.9 2.2 2.2"/><path d="m4.9 19.1 2.2-2.2"/><path d="m16.9 7.1 2.2-2.2"/>',
+      '其他': '<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+    };
+
+    function toast(msg) {
+      const t = $('toast');
+      t.textContent = msg;
+      t.classList.remove('opacity-0', 'translate-y-2', 'pointer-events-none');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.add('opacity-0', 'translate-y-2', 'pointer-events-none'), 3000);
+    }
+
+    // ==================== 自定义下拉组件 ====================
+    // 保留隐藏的原生 select 作为数据源（现有读写 .value 的逻辑零改动），
+    // 仅替换触发器与弹层的视觉。点击外部 / Esc 关闭。
+    const DD_CHEVRON = '<svg class="cust-chevron w-3.5 h-3.5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>';
+    const DD_CHECK = '<svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
+    function initCustomSelect(select) {
+      if (select.dataset.custInit) return;
+      select.dataset.custInit = '1';
+
+      const wrap = document.createElement('div');
+      wrap.className = 'cust-dd relative';
+      select.parentNode.insertBefore(wrap, select);
+      wrap.appendChild(select);
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cust-trigger w-full flex items-center justify-between gap-2 bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle hover:border-slate-300 transition-all text-left';
+      const label = document.createElement('span');
+      label.className = 'truncate flex-1';
+      btn.appendChild(label);
+      btn.insertAdjacentHTML('beforeend', DD_CHEVRON);
+
+      const list = document.createElement('div');
+      list.className = 'hidden absolute left-0 right-0 top-full mt-1.5 z-30 bg-white border border-lineLight rounded-xl shadow-xl py-1 max-h-52 overflow-auto custom-scrollbar';
+
+      wrap.append(btn, list);
+
+      function sync() {
+        const opt = select.options[select.selectedIndex];
+        label.textContent = opt ? opt.text : '';
+        list.innerHTML = '';
+        [...select.options].forEach(o => {
+          const item = document.createElement('div');
+          const active = o.value === select.value;
+          item.className = 'mx-1 px-3 py-2 rounded-lg text-xs cursor-pointer flex items-center justify-between gap-2 '
+            + (active ? 'bg-blue-50 text-primary-600 font-medium' : 'text-inkBody hover:bg-slate-50');
+          const span = document.createElement('span');
+          span.className = 'truncate';
+          span.textContent = o.text;
+          item.appendChild(span);
+          if (active) item.insertAdjacentHTML('beforeend', DD_CHECK);
+          item.addEventListener('click', () => {
+            select.value = o.value;
+            select.dispatchEvent(new Event('change'));  // 保持既有 change 监听（如语言偏好记忆）生效
+            sync();
+            close();
+          });
+          list.appendChild(item);
+        });
+      }
+      function open() {
+        sync();
+        list.classList.remove('hidden');
+        wrap.classList.add('dd-open');
+        btn.classList.add('!border-blue-400', '!bg-white');
+      }
+      function close() {
+        list.classList.add('hidden');
+        wrap.classList.remove('dd-open');
+        btn.classList.remove('!border-blue-400', '!bg-white');
+      }
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        list.classList.contains('hidden') ? open() : close();
+      });
+      document.addEventListener('click', e => { if (!wrap.contains(e.target)) close(); });
+      document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+
+      sync();
+      select._syncDD = sync;  // 选项被代码重建后调用以刷新显示（如引擎列表加载）
+    }
+
+    // ==================== 自定义下拉组件结束 ====================
+
+    // ==================== 页面切换 ====================
+    function switchPage(page) {
+      ['workbench', 'terms', 'records', 'settings'].forEach(p => {
+        const sec = $('page-' + p);
+        if (sec) sec.classList.toggle('hidden', p !== page);
+        const btn = $('navBtn-' + p);
+        if (btn) btn.classList.toggle('nav-active', p === page);
+      });
+      if (page === 'terms') loadTerms();
+      if (page === 'records') loadRecords();
+      if (page === 'settings') { loadEngines(); refreshBalance(); loadUsageSummary(); }
+    }
+
+    // ==================== 余额 / 系统状态 ====================
+    async function refreshBalance() {
+      try {
+        const resp = await fetch('/api/system/status');
+        const data = await resp.json();
+        if (data.balance != null) {
+          const formatted = `￥ ${data.balance.toFixed(2)}`;
+          $('headerBalance').textContent = formatted;
+          $('settingsBalanceValue').textContent = formatted + ' ' + data.currency;
+        } else {
+          $('headerBalance').textContent = '￥ --';
+        }
+        if (data.primary_ip) {
+          $('fullLanUrl').textContent = `http://${data.primary_ip}:7860`;
+        }
+      } catch (e) { console.error(e); }
+    }
+
+    async function loadUsageSummary() {
+      try {
+        const resp = await fetch('/api/history');
+        const data = await resp.json();
+        const done = data.records.filter(r => r.status === 'completed');
+        const cost = done.reduce((s, r) => s + (r.total_cost || 0), 0);
+        $('usageSummary').textContent = `${data.count} 个任务 · 约 ￥${cost.toFixed(3)}`;
+      } catch (e) { console.error(e); }
+    }
+
+    function copyLanIp() {
+      const text = $('fullLanUrl').textContent;
+      const done = () => toast('已复制局域网分享链接到剪贴板！');
+      const fail = () => toast('自动复制失败，请手动选择并复制该链接。');
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done).catch(() => (legacyCopyText(text) ? done() : fail()));
+      } else {
+        legacyCopyText(text) ? done() : fail();
+      }
+    }
+    function legacyCopyText(text) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (e) { return false; }
+    }
+
+    // ==================== 翻译引擎切换（工作台） ====================
+    async function loadEngineOptions() {
+      try {
+        const resp = await fetch('/api/providers');
+        const data = await resp.json();
+        const sel = $('modelSelect');
+        sel.innerHTML = '';
+        (data.providers || []).forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = `${p.name} · ${p.vision_model}`;
+          sel.appendChild(opt);
+        });
+        sel.value = data.active_provider || '';
+        if (sel._syncDD) sel._syncDD();  // 刷新自定义下拉显示
+      } catch (e) { console.error(e); }
+    }
+
+    async function switchEngine(id) {
+      if (!id) return;
+      toast('正在验证新引擎的识图能力...');
+      try {
+        const resp = await fetch('/api/providers/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id })
+        });
+        const data = await resp.json();
+        toast(data.message || (data.success ? '已切换' : '切换失败'));
+        refreshBalance();
+      } catch (e) {
+        toast('切换异常: ' + e.message);
+      }
+      loadEngineOptions();
+    }
+
+    // ==================== 翻译工作台 ====================
+    function setMode(mode) {
+      currentMode = mode;
+      $('modeBtn-cad').classList.toggle('bg-white', mode === 'cad');
+      $('modeBtn-cad').classList.toggle('shadow-sm', mode === 'cad');
+      $('modeBtn-cad').classList.toggle('text-primary-600', mode === 'cad');
+      $('modeBtn-cad').classList.toggle('text-slate-500', mode !== 'cad');
+      $('modeBtn-doc').classList.toggle('bg-white', mode === 'doc');
+      $('modeBtn-doc').classList.toggle('shadow-sm', mode === 'doc');
+      $('modeBtn-doc').classList.toggle('text-primary-600', mode === 'doc');
+      $('modeBtn-doc').classList.toggle('text-slate-500', mode !== 'doc');
+      $('docOptions').classList.toggle('hidden', mode !== 'doc');
+      $('pageRangeWrap').classList.toggle('hidden', mode === 'doc');
+      $('startBtnText').textContent = mode === 'doc' ? '开始文档翻译' : '开始翻译';
+    }
+
+    function handleDragOver(e) {
+      e.preventDefault();
+      $('dropzone').classList.add('border-blue-400', 'bg-blue-50');
+    }
+    function handleDragLeave(e) {
+      e.preventDefault();
+      $('dropzone').classList.remove('border-blue-400', 'bg-blue-50');
+    }
+    function handleDrop(e) {
+      e.preventDefault();
+      handleDragLeave(e);
+      if (e.dataTransfer.files.length > 0) {
+        $('fileInput').files = e.dataTransfer.files;
+        updateFileDisplay(e.dataTransfer.files[0]);
+      }
+    }
+    function handleFileSelect(e) {
+      if (e.target.files.length > 0) updateFileDisplay(e.target.files[0]);
+    }
+    function updateFileDisplay(file) {
+      const ext = (file.name.includes('.') ? file.name.split('.').pop() : '').toLowerCase();
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+      $('fileNameDisplay').textContent = file.name;
+      if (ext === 'pdf') {
+        $('fileSizeDisplay').textContent = `${sizeMb} MB · 已就绪，点击下方按钮开始翻译`;
+        $('fileSizeDisplay').classList.remove('text-rose-500');
+      } else {
+        $('fileSizeDisplay').textContent = `格式 .${ext || '?'}（仅支持 PDF！）`;
+        $('fileSizeDisplay').classList.add('text-rose-500');
+      }
+      setFileSelectedUI(true);
+    }
+
+    // 源文件卡双状态切换：空状态(蓝色上传) / 已选文件(绿色对勾)，杜绝"看不出已上传"的错觉
+    function setFileSelectedUI(selected) {
+      const zone = $('dropzone');
+      const iconWrap = $('fileIconWrap');
+      const btn = $('fileSelectBtn');
+      zone.classList.toggle('border-emerald-300', selected);
+      zone.classList.toggle('bg-emerald-50/40', selected);
+      zone.classList.toggle('border-blue-200', !selected);
+      zone.classList.toggle('bg-blue-50/30', !selected);
+      iconWrap.className = selected
+        ? 'w-12 h-12 mx-auto rounded-xl bg-emerald-500 flex items-center justify-center text-white shadow-sm group-hover:scale-105 transition-transform'
+        : 'w-12 h-12 mx-auto rounded-xl bg-white border border-blue-100 flex items-center justify-center text-primary-500 shadow-sm group-hover:scale-105 transition-transform';
+      iconWrap.innerHTML = selected
+        ? '<svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
+        : '<svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>';
+      btn.textContent = selected ? '重新选择' : '选择文件';
+      btn.className = selected
+        ? 'mt-4 px-5 py-1.5 bg-white border border-slate-200 text-slate-600 text-xs font-medium rounded-full hover:bg-slate-50 transition-colors pointer-events-none'
+        : 'mt-4 px-5 py-1.5 bg-white border border-blue-200 text-primary-600 text-xs font-medium rounded-full hover:bg-blue-50 transition-colors pointer-events-none';
+    }
+
+    function setStatus(dotColor, text, subText, pulse) {
+      const dot = $('statusDot');
+      dot.className = `w-2 h-2 rounded-full ${dotColor} shrink-0` + (pulse ? ' dot-pulse' : '');
+      $('statusText').textContent = text;
+      $('statusSubText').textContent = subText || '';
+    }
+
+    function setDownloadEnabled(outputPdf) {
+      const btn = $('downloadPdfBtn');
+      if (outputPdf) {
+        btn.href = `/api/download/${encodeURIComponent(outputPdf)}`;
+        btn.classList.remove('opacity-40', 'pointer-events-none');
+      } else {
+        btn.removeAttribute('href');
+        btn.classList.add('opacity-40', 'pointer-events-none');
+      }
+    }
+
+    function applyPreferencesToForm() {
+      try {
+        const prefs = JSON.parse(localStorage.getItem('zy_preferences') || '{}');
+        if (prefs.lang) $('langSelect').value = prefs.lang;
+      } catch (e) {}
+    }
+
+    $('langSelect').addEventListener('change', () => {
+      try {
+        const prefs = JSON.parse(localStorage.getItem('zy_preferences') || '{}');
+        prefs.lang = $('langSelect').value;
+        localStorage.setItem('zy_preferences', JSON.stringify(prefs));
+      } catch (e) {}
+    });
+
+    async function submitTranslation() {
+      const fileInput = $('fileInput');
+      if (!fileInput.files.length) {
+        toast('请先拖入或选择 PDF 文件！');
+        return;
+      }
+      const file = fileInput.files[0];
+      if (!file.name.toLowerCase().endsWith('.pdf')) {
+        toast('仅支持 PDF 格式文件！');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+      let taskId = null;
+      try {
+        let resp;
+        if (currentMode === 'cad') {
+          formData.append('page_range', $('pageRangeInput').value);
+          formData.append('target_lang', $('langSelect').value);
+          resp = await fetch('/api/translate/cad', { method: 'POST', body: formData });
+        } else {
+          formData.append('mode', document.querySelector('input[name="docMode"]:checked').value);
+          resp = await fetch('/api/translate/doc', { method: 'POST', body: formData });
+        }
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.detail || `提交失败 (HTTP ${resp.status})`);
+        }
+        const data = await resp.json();
+        if (!data.task_id) throw new Error('服务端未返回任务ID');
+        taskId = data.task_id;
+      } catch (e) {
+        toast('提交失败: ' + e.message);
+        return;
+      }
+
+      // 锁定按钮，进入轮询
+      $('startBtn').disabled = true;
+      $('startBtn').classList.add('opacity-60', 'cursor-not-allowed');
+      setStatus('bg-blue-500', '翻译中 · 0%', '已提交任务，正在排队解析...', true);
+      setDownloadEnabled(null);
+      resetPdfPreview();
+
+      pollTask(taskId);
+    }
+
+    function resetStartBtn() {
+      $('startBtn').disabled = false;
+      $('startBtn').classList.remove('opacity-60', 'cursor-not-allowed');
+    }
+
+    function pollTask(taskId) {
+      if (currentTaskPollInterval) clearInterval(currentTaskPollInterval);
+      let attempts = 0;
+      let consecutiveErrors = 0;
+      const MAX_ATTEMPTS = 3600;
+      currentTaskPollInterval = setInterval(async () => {
+        attempts++;
+        if (attempts > MAX_ATTEMPTS) {
+          clearInterval(currentTaskPollInterval);
+          resetStartBtn();
+          setStatus('bg-rose-500', '查询超时', '请稍后在项目记录页查看结果', false);
+          return;
+        }
+        try {
+          const resp = await fetch(`/api/task/${taskId}`);
+          if (!resp.ok) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= 10) {
+              clearInterval(currentTaskPollInterval);
+              resetStartBtn();
+              toast('任务查询失败，请刷新页面重试。');
+            }
+            return;
+          }
+          consecutiveErrors = 0;
+          const task = await resp.json();
+
+          if (task.status === 'processing' || task.status === 'pending') {
+            setStatus('bg-blue-500', `翻译中 · ${Math.round(task.progress || 0)}%`, task.message || '', true);
+          } else if (task.status === 'completed') {
+            clearInterval(currentTaskPollInterval);
+            resetStartBtn();
+            const r = task.result || {};
+            setStatus('bg-emerald-500', '翻译完成', `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
+            setDownloadEnabled(r.output_pdf);
+            if (r.output_pdf) loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
+            refreshBalance();
+            toast('翻译完成！');
+          } else if (task.status === 'failed') {
+            clearInterval(currentTaskPollInterval);
+            resetStartBtn();
+            setStatus('bg-rose-500', '翻译失败', task.error || '', false);
+            toast('处理失败: ' + task.error);
+          }
+        } catch (e) {
+          console.error(e);
+          consecutiveErrors++;
+          if (consecutiveErrors >= 10) {
+            clearInterval(currentTaskPollInterval);
+            resetStartBtn();
+            toast('网络异常，已停止查询。');
+          }
+        }
+      }, 1000);
+    }
+
+    // ==================== PDF.js 预览 ====================
+    function resetPdfPreview() {
+      pdfState.doc = null;
+      pdfState.page = 1;
+      pdfState.total = 0;
+      $('previewEmpty').classList.remove('hidden');
+      $('pdfWrap').classList.add('hidden');
+      $('pdfControls').classList.add('hidden');
+    }
+
+    async function loadPdfPreview(url) {
+      try {
+        const buf = await fetch(url).then(r => {
+          if (!r.ok) throw new Error('加载失败');
+          return r.arrayBuffer();
+        });
+        pdfState.doc = await pdfjsLib.getDocument({ data: buf }).promise;
+        pdfState.total = pdfState.doc.numPages;
+        pdfState.page = 1;
+        pdfState.scale = 1.2;
+        $('previewEmpty').classList.add('hidden');
+        $('pdfWrap').classList.remove('hidden');
+        $('pdfControls').classList.remove('hidden');
+        await renderPdfPage();
+      } catch (e) {
+        console.error(e);
+        toast('预览加载失败：' + e.message);
+      }
+    }
+
+    async function renderPdfPage() {
+      if (!pdfState.doc) return;
+      const page = await pdfState.doc.getPage(pdfState.page);
+      const canvas = $('pdfCanvas');
+      const dpr = window.devicePixelRatio || 1;
+      const viewport = page.getViewport({ scale: pdfState.scale * dpr });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = (viewport.width / dpr) + 'px';
+      canvas.style.height = (viewport.height / dpr) + 'px';
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: viewport }).promise;
+      $('pageIndicator').textContent = `${pdfState.page} / ${pdfState.total}`;
+      $('zoomIndicator').textContent = Math.round(pdfState.scale / 1.2 * 100) + '%';
+      $('btnPrev').disabled = pdfState.page <= 1;
+      $('btnNext').disabled = pdfState.page >= pdfState.total;
+    }
+
+    async function pdfPrev() {
+      if (pdfState.page > 1) { pdfState.page--; await renderPdfPage(); }
+    }
+    async function pdfNext() {
+      if (pdfState.page < pdfState.total) { pdfState.page++; await renderPdfPage(); }
+    }
+    async function pdfZoom(delta) {
+      const next = Math.min(3, Math.max(0.5, pdfState.scale + delta));
+      if (next === pdfState.scale) return;
+      pdfState.scale = next;
+      await renderPdfPage();
+    }
+    function pdfFullscreen() {
+      const stage = $('previewStage');
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        stage.requestFullscreen && stage.requestFullscreen();
+      }
+    }
+
+    // ==================== 术语库 ====================
+    async function loadTerms() {
+      try {
+        const resp = await fetch('/api/terms');
+        const data = await resp.json();
+        cachedTerms = data.terms || [];
+        renderTerms();
+      } catch (e) {
+        console.error(e);
+        toast('词库加载失败');
+      }
+    }
+
+    function filteredTerms() {
+      const kw = ($('termSearchInput').value || '').trim().toLowerCase();
+      return cachedTerms.filter(t => {
+        if (termFilterCategory && (t.category || '') !== termFilterCategory) return false;
+        if (!kw) return true;
+        return (t.en || '').toLowerCase().includes(kw)
+          || (t.zh || '').toLowerCase().includes(kw)
+          || (t.category || '').toLowerCase().includes(kw);
+      });
+    }
+
+    function renderTerms() {
+      // 侧栏分类
+      const counts = {};
+      cachedTerms.forEach(t => {
+        const c = t.category || '';
+        counts[c] = (counts[c] || 0) + 1;
+      });
+      const catList = $('categoryList');
+      catList.innerHTML = '';
+      const mkCatBtn = (name, count) => {
+        const btn = document.createElement('button');
+        const active = (name === '全部术语' && !termFilterCategory) || name === termFilterCategory;
+        btn.className = 'w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-medium transition-all ' +
+          (active ? 'bg-blue-50 text-primary-600' : 'text-inkBody hover:bg-slate-50');
+        const iconPath = CATEGORY_ICONS[name] || CATEGORY_ICONS['其他'];
+        btn.innerHTML = `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${iconPath}</svg><span class="flex-1 text-left"></span><span class="text-[10px] text-slate-400"></span>`;
+        btn.children[1].textContent = name;
+        btn.children[2].textContent = count;
+        btn.addEventListener('click', () => {
+          termFilterCategory = (name === '全部术语') ? '' : name;
+          termPage = 1;
+          renderTerms();
+        });
+        catList.appendChild(btn);
+      };
+      mkCatBtn('全部术语', cachedTerms.length);
+      Object.keys(counts).filter(c => c).sort().forEach(c => mkCatBtn(c, counts[c]));
+
+      // 表格
+      const list = filteredTerms();
+      const totalPages = Math.max(1, Math.ceil(list.length / TERM_PAGE_SIZE));
+      if (termPage > totalPages) termPage = totalPages;
+      const pageList = list.slice((termPage - 1) * TERM_PAGE_SIZE, termPage * TERM_PAGE_SIZE);
+
+      const tbody = $('termsTableBody');
+      tbody.innerHTML = '';
+      if (pageList.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="7" class="px-4 py-12 text-center text-slate-300">未检索到匹配的词条</td>';
+        tbody.appendChild(tr);
+      }
+      pageList.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-slate-50/70 transition-colors';
+        const checked = selectedTerms.has(t.en);
+
+        const tdCheck = document.createElement('td');
+        tdCheck.className = 'px-4 py-3';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'accent-blue-600 rounded';
+        cb.checked = checked;
+        cb.addEventListener('change', () => {
+          cb.checked ? selectedTerms.add(t.en) : selectedTerms.delete(t.en);
+          updateBatchBar();
+        });
+        tdCheck.appendChild(cb);
+
+        const tdEn = document.createElement('td');
+        tdEn.className = 'px-4 py-3 font-mono font-medium text-inkTitle';
+        tdEn.textContent = t.en;
+
+        const tdZh = document.createElement('td');
+        tdZh.className = 'px-4 py-3 text-inkBody';
+        tdZh.textContent = t.zh;
+
+        const tdCat = document.createElement('td');
+        tdCat.className = 'px-4 py-3';
+        if (t.category) {
+          const badge = document.createElement('span');
+          const style = CATEGORY_STYLES[t.category] || 'bg-slate-100 text-slate-600 border-slate-200';
+          badge.className = `text-[10px] px-2 py-0.5 rounded-full border ${style}`;
+          badge.textContent = t.category;
+          tdCat.appendChild(badge);
+        } else {
+          tdCat.className += ' text-slate-300';
+          tdCat.textContent = '-';
+        }
+
+        const tdCount = document.createElement('td');
+        tdCount.className = 'px-4 py-3 font-mono text-inkBody';
+        tdCount.textContent = t.count || 0;
+
+        const tdTime = document.createElement('td');
+        tdTime.className = 'px-4 py-3 text-inkMuted';
+        tdTime.textContent = t.updated_at || '-';
+
+        const tdOp = document.createElement('td');
+        tdOp.className = 'px-4 py-3 text-right whitespace-nowrap';
+        const editBtn = document.createElement('button');
+        editBtn.className = 'text-slate-400 hover:text-primary-600 transition-colors p-1';
+        editBtn.title = '编辑';
+        editBtn.innerHTML = '<svg class="w-3.5 h-3.5 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+        editBtn.addEventListener('click', () => openTermModal(t.en));
+        const delBtn = document.createElement('button');
+        delBtn.className = 'text-slate-400 hover:text-rose-500 transition-colors p-1 ml-1';
+        delBtn.title = '删除';
+        delBtn.innerHTML = '<svg class="w-3.5 h-3.5 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+        delBtn.addEventListener('click', () => deleteTerm(t.en));
+        tdOp.append(editBtn, delBtn);
+
+        tr.append(tdCheck, tdEn, tdZh, tdCat, tdCount, tdTime, tdOp);
+        tbody.appendChild(tr);
+      });
+
+      $('termsCountDisplay').textContent = `共 ${list.length} 条记录`;
+      $('termPageIndicator').textContent = `${termPage} / ${totalPages}`;
+      $('termPagePrev').disabled = termPage <= 1;
+      $('termPageNext').disabled = termPage >= totalPages;
+      updateBatchBar();
+    }
+
+    function updateBatchBar() {
+      const bar = $('batchBar');
+      if (selectedTerms.size > 0) {
+        bar.classList.remove('hidden');
+        bar.classList.add('flex');
+        $('selectedCount').textContent = selectedTerms.size;
+      } else {
+        bar.classList.add('hidden');
+        bar.classList.remove('flex');
+      }
+    }
+
+    function toggleCheckAll(el) {
+      const list = filteredTerms();
+      const pageList = list.slice((termPage - 1) * TERM_PAGE_SIZE, termPage * TERM_PAGE_SIZE);
+      pageList.forEach(t => el.checked ? selectedTerms.add(t.en) : selectedTerms.delete(t.en));
+      renderTerms();
+    }
+    function clearTermSelection() {
+      selectedTerms.clear();
+      renderTerms();
+    }
+    function termPageMove(d) {
+      termPage += d;
+      renderTerms();
+    }
+    function onTermSearch() {
+      clearTimeout(termSearchTimer);
+      termSearchTimer = setTimeout(() => { termPage = 1; renderTerms(); }, 200);
+    }
+
+    // 词条弹窗
+    let editingTermKey = null;
+    function openTermModal(en) {
+      editingTermKey = en || null;
+      $('termModalTitle').textContent = en ? '编辑词条' : '新建词条';
+      $('modalEnInput').value = en || '';
+      const item = en ? cachedTerms.find(t => t.en === en) : null;
+      $('modalZhInput').value = item ? item.zh : '';
+      $('modalCategoryInput').value = item ? (item.category || '') : '';
+      $('modalEnInput').disabled = !!en;
+      $('termModal').classList.remove('hidden');
+      $('termModal').classList.add('flex');
+      (!$('modalEnInput').disabled ? $('modalEnInput') : $('modalZhInput')).focus();
+    }
+    function closeTermModal() {
+      $('termModal').classList.add('hidden');
+      $('termModal').classList.remove('flex');
+    }
+    async function confirmTermModal() {
+      const en = $('modalEnInput').value.trim();
+      const zh = $('modalZhInput').value.trim();
+      const category = $('modalCategoryInput').value.trim();
+      if (!en || !zh) {
+        toast('英文原文与中文译文均不能为空！');
+        return;
+      }
+      try {
+        const resp = await fetch('/api/terms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ en, zh, category })
+        });
+        if (resp.ok) {
+          closeTermModal();
+          toast(`已保存词条: ${en} -> ${zh}`);
+          loadTerms();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          toast('保存失败: ' + (err.detail || `HTTP ${resp.status}`));
+        }
+      } catch (e) {
+        toast('保存异常: ' + e.message);
+      }
+    }
+
+    async function deleteTerm(key) {
+      if (!confirm(`确定要移除词条 "${key}" 吗？`)) return;
+      try {
+        const resp = await fetch(`/api/terms/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        if (resp.ok) {
+          selectedTerms.delete(key);
+          toast(`已移除词条: ${key}`);
+          loadTerms();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          toast('删除失败: ' + (err.detail || `HTTP ${resp.status}`));
+        }
+      } catch (e) {
+        toast('删除失败: ' + e.message);
+      }
+    }
+
+    async function deleteSelectedTerms() {
+      const keys = [...selectedTerms];
+      if (!keys.length) return;
+      if (!confirm(`确定要删除选中的 ${keys.length} 条词条吗？`)) return;
+      try {
+        const resp = await fetch('/api/terms/batch-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys })
+        });
+        if (resp.ok) {
+          toast(`已删除 ${keys.length} 条词条`);
+          selectedTerms.clear();
+          loadTerms();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          toast('批量删除失败: ' + (err.detail || `HTTP ${resp.status}`));
+        }
+      } catch (e) {
+        toast('批量删除异常: ' + e.message);
+      }
+    }
+
+    function exportTerms(format) {
+      window.open(`/api/terms/export?format=${format}`, '_blank');
+    }
+
+    function handleImportFile(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const text = reader.result;
+        let data = null;
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          // 尝试 CSV（表头：英文原文/中文译文/分类 或 en/zh/category）
+          const lines = text.split(/\r?\n/).filter(l => l.trim());
+          if (lines.length >= 2) {
+            const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+            const iEn = header.indexOf('英文原文') >= 0 ? header.indexOf('英文原文') : header.indexOf('en');
+            const iZh = header.indexOf('中文译文') >= 0 ? header.indexOf('中文译文') : header.indexOf('zh');
+            const iCat = header.indexOf('分类') >= 0 ? header.indexOf('分类') : header.indexOf('category');
+            if (iEn >= 0 && iZh >= 0) {
+              data = lines.slice(1).map(line => {
+                const cols = line.split(',');
+                return { en: (cols[iEn] || '').trim(), zh: (cols[iZh] || '').trim(), category: iCat >= 0 ? (cols[iCat] || '').trim() : '' };
+              });
+            }
+          }
+        }
+        if (!data) {
+          toast('文件解析失败，仅支持 JSON 或 CSV');
+          return;
+        }
+        try {
+          const resp = await fetch('/api/terms/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data })
+          });
+          if (resp.ok) {
+            const r = await resp.json();
+            toast(`导入完成：新增/更新 ${r.imported} 条`);
+            loadTerms();
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            toast('导入失败: ' + (err.detail || `HTTP ${resp.status}`));
+          }
+        } catch (err) {
+          toast('导入异常: ' + err.message);
+        }
+      };
+      reader.readAsText(file, 'utf-8');
+      e.target.value = '';
+    }
+
+    // ==================== 项目记录 ====================
+    async function loadRecords() {
+      try {
+        const q = new URLSearchParams();
+        if (recordFilter !== 'all') q.set('status', recordFilter);
+        const kw = ($('recordSearchInput').value || '').trim();
+        if (kw) q.set('search', kw);
+        const resp = await fetch('/api/history?' + q.toString());
+        const data = await resp.json();
+        renderRecords(data.records || [], data.count || 0);
+      } catch (e) {
+        console.error(e);
+        toast('项目记录加载失败');
+      }
+    }
+
+    function formatSize(bytes) {
+      if (!bytes) return '-';
+      const mb = bytes / (1024 * 1024);
+      return mb >= 1 ? mb.toFixed(1) + ' MB' : (bytes / 1024).toFixed(0) + ' KB';
+    }
+
+    function statusBadge(status) {
+      if (status === 'completed') return '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600 text-[11px] whitespace-nowrap"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>已完成</span>';
+      if (status === 'failed') return '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 border border-rose-100 text-rose-600 text-[11px] whitespace-nowrap"><span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>失败</span>';
+      return '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] whitespace-nowrap"><span class="w-1.5 h-1.5 rounded-full bg-blue-500 dot-pulse"></span>翻译中</span>';
+    }
+
+    function renderRecords(records, count) {
+      const tbody = $('recordsTableBody');
+      tbody.innerHTML = '';
+      if (records.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="7" class="px-4 py-12 text-center text-slate-300">还没有翻译记录，去工作台开始第一个项目吧</td>';
+        tbody.appendChild(tr);
+      }
+      records.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-slate-50/70 transition-colors';
+
+        const tdName = document.createElement('td');
+        tdName.className = 'px-4 py-3 font-bold text-inkTitle';
+        tdName.textContent = r.project_name || r.filename || '-';
+
+        const tdFile = document.createElement('td');
+        tdFile.className = 'px-4 py-3';
+        const fileWrap = document.createElement('div');
+        fileWrap.className = 'flex items-center gap-2';
+        const fileIcon = document.createElement('span');
+        fileIcon.className = 'w-7 h-8 rounded bg-rose-50 border border-rose-100 text-rose-500 text-[8px] font-black flex items-center justify-center shrink-0';
+        fileIcon.textContent = 'PDF';
+        const fileInfo = document.createElement('div');
+        fileInfo.className = 'min-w-0';
+        const fileName = document.createElement('p');
+        fileName.className = 'text-inkBody truncate max-w-[180px]';
+        fileName.textContent = r.filename || '-';
+        const fileSize = document.createElement('p');
+        fileSize.className = 'text-[10px] text-slate-300';
+        fileSize.textContent = formatSize(r.file_size);
+        fileInfo.append(fileName, fileSize);
+        fileWrap.append(fileIcon, fileInfo);
+        tdFile.appendChild(fileWrap);
+
+        const tdLang = document.createElement('td');
+        tdLang.className = 'px-4 py-3';
+        const langChip = document.createElement('span');
+        langChip.className = 'px-2 py-0.5 rounded-full bg-slate-50 border border-lineLight text-inkMuted text-[10px] font-mono';
+        const srcLabel = LANG_NAMES[r.source_lang] || (r.source_lang ? r.source_lang.toUpperCase() : '自动');
+        const tgtLabel = LANG_NAMES[r.target_lang] || r.target_lang || '中文';
+        langChip.textContent = srcLabel + ' → ' + tgtLabel;
+        tdLang.appendChild(langChip);
+
+        const tdPages = document.createElement('td');
+        tdPages.className = 'px-4 py-3 text-inkBody';
+        tdPages.textContent = r.pages != null ? r.pages + ' 页' : '-';
+
+        const tdStatus = document.createElement('td');
+        tdStatus.className = 'px-4 py-3';
+        tdStatus.innerHTML = statusBadge(r.status);
+
+        const tdTime = document.createElement('td');
+        tdTime.className = 'px-4 py-3 text-inkMuted';
+        tdTime.textContent = r.updated_at || '-';
+
+        const tdOp = document.createElement('td');
+        tdOp.className = 'px-4 py-3 text-right whitespace-nowrap';
+        const viewBtn = document.createElement('button');
+        viewBtn.className = 'px-3 py-1.5 bg-white border border-lineLight text-inkBody rounded-lg hover:border-blue-300 hover:text-primary-600 transition-colors';
+        viewBtn.textContent = '查看';
+        viewBtn.addEventListener('click', () => viewRecord(r));
+        tdOp.appendChild(viewBtn);
+        if (r.output_pdf && r.status === 'completed') {
+          const dlBtn = document.createElement('a');
+          dlBtn.className = 'ml-1.5 px-3 py-1.5 bg-white border border-blue-200 text-primary-600 rounded-lg hover:bg-blue-50 transition-colors inline-flex items-center gap-1';
+          dlBtn.href = `/api/download/${encodeURIComponent(r.output_pdf)}`;
+          dlBtn.setAttribute('download', '');
+          dlBtn.innerHTML = '<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>下载';
+          tdOp.appendChild(dlBtn);
+        }
+
+        tr.append(tdName, tdFile, tdLang, tdPages, tdStatus, tdTime, tdOp);
+        tbody.appendChild(tr);
+      });
+      $('recordsCountDisplay').textContent = `共 ${count} 条记录`;
+    }
+
+    function viewRecord(r) {
+      if (r.status === 'completed' && r.output_pdf) {
+        switchPage('workbench');
+        setStatus('bg-emerald-500', '翻译完成', `项目「${r.project_name}」的历史成果`, false);
+        setDownloadEnabled(r.output_pdf);
+        loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
+      } else if (r.status === 'failed') {
+        toast('该任务翻译失败：' + (r.error || '未知原因'));
+      } else {
+        toast('该任务正在进行中，请稍后查看');
+        loadRecords();
+      }
+    }
+
+    function setRecordFilter(status) {
+      recordFilter = status;
+      const names = { all: '全部', processing: '进行中', completed: '已完成', failed: '失败' };
+      document.querySelectorAll('#recordFilterChips .record-chip').forEach(btn => {
+        const active = btn.textContent.trim() === names[status];
+        btn.classList.toggle('bg-white', active);
+        btn.classList.toggle('shadow-sm', active);
+        btn.classList.toggle('text-primary-600', active);
+        btn.classList.toggle('font-medium', active);
+        btn.classList.toggle('text-slate-500', !active);
+      });
+      loadRecords();
+    }
+
+    function onRecordSearch() {
+      clearTimeout(recordSearchTimer);
+      recordSearchTimer = setTimeout(loadRecords, 300);
+    }
+
+    // ==================== 设置页：翻译引擎管理 ====================
+    function setSettingsSection(sec) {
+      ['engines', 'api', 'lan'].forEach(s => {
+        $('setSec-' + s).classList.toggle('hidden', s !== sec);
+        const btn = $('setSecBtn-' + s);
+        btn.classList.toggle('bg-blue-50', s === sec);
+        btn.classList.toggle('text-primary-600', s === sec);
+        btn.classList.toggle('text-inkBody', s !== sec);
+      });
+    }
+
+    async function loadEngines() {
+      try {
+        const resp = await fetch('/api/providers');
+        const data = await resp.json();
+        renderEngines(data.providers || [], data.active_provider);
+      } catch (e) {
+        console.error(e);
+        toast('引擎列表加载失败');
+      }
+    }
+
+    function renderEngines(list, activeId) {
+      const wrap = $('engineList');
+      wrap.innerHTML = '';
+      if (!list.length) {
+        const empty = document.createElement('p');
+        empty.className = 'text-xs text-slate-300 py-8 text-center border border-dashed border-lineLight rounded-xl';
+        empty.textContent = '还没有接入任何引擎，点击右上角「接入新引擎」';
+        wrap.appendChild(empty);
+        return;
+      }
+      list.forEach(p => {
+        const active = p.id === activeId;
+        const card = document.createElement('div');
+        card.className = 'border rounded-xl p-4 ' + (active ? 'border-blue-300 bg-blue-50/40' : 'border-lineLight');
+
+        const top = document.createElement('div');
+        top.className = 'flex items-center justify-between gap-3';
+        const nameWrap = document.createElement('div');
+        nameWrap.className = 'flex items-center gap-2 min-w-0';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'text-sm font-bold text-inkTitle';
+        nameEl.textContent = p.name;
+        const modelEl = document.createElement('span');
+        modelEl.className = 'text-[11px] font-mono text-inkMuted truncate';
+        modelEl.textContent = p.vision_model;
+        nameWrap.append(nameEl, modelEl);
+        const badge = document.createElement('span');
+        if (active) {
+          badge.className = 'shrink-0 text-[10px] px-2 py-0.5 rounded-full bg-primary-600 text-white font-bold whitespace-nowrap';
+          badge.textContent = '使用中';
+        }
+        top.append(nameWrap, badge);
+
+        const meta = document.createElement('p');
+        meta.className = 'text-[11px] text-inkMuted mt-1.5 font-mono truncate';
+        const priceText = (p.price_in != null && p.price_out != null) ? ` · ￥${p.price_in}/￥${p.price_out} 每百万` : '';
+        meta.textContent = `${p.base_url} · 密钥 ${p.api_key_masked}${priceText}`;
+
+        const ops = document.createElement('div');
+        ops.className = 'flex items-center gap-2 mt-3';
+        if (!active) {
+          const actBtn = document.createElement('button');
+          actBtn.className = 'grad-btn px-3.5 py-1.5 rounded-lg text-white text-xs font-bold';
+          actBtn.textContent = '验证并启用';
+          actBtn.addEventListener('click', () => activateEngine(p.id, actBtn));
+          ops.appendChild(actBtn);
+        }
+        const editBtn = document.createElement('button');
+        editBtn.className = 'px-3.5 py-1.5 bg-white border border-lineLight text-inkBody rounded-lg text-xs hover:border-blue-300 transition-colors';
+        editBtn.textContent = '编辑';
+        editBtn.addEventListener('click', () => openEngineModal(p.id));
+        const delBtn = document.createElement('button');
+        delBtn.className = 'px-3.5 py-1.5 bg-white border border-rose-100 text-rose-500 rounded-lg text-xs hover:bg-rose-50 transition-colors';
+        delBtn.textContent = '删除';
+        delBtn.addEventListener('click', () => deleteEngine(p.id, p.name));
+        ops.append(editBtn, delBtn);
+
+        card.append(top, meta, ops);
+        wrap.appendChild(card);
+      });
+    }
+
+    async function activateEngine(id, btn) {
+      const oldText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '验证中...';
+      try {
+        const resp = await fetch('/api/providers/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id })
+        });
+        const data = await resp.json();
+        toast(data.message || (data.success ? '已启用' : '启用失败'));
+        loadEngines();
+        loadEngineOptions();
+        refreshBalance();
+      } catch (e) {
+        toast('启用异常: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = oldText;
+      }
+    }
+
+    async function deleteEngine(id, name) {
+      if (!confirm(`确定要删除引擎「${name}」吗？`)) return;
+      try {
+        const resp = await fetch('/api/providers/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id })
+        });
+        if (resp.ok) {
+          toast(`已删除引擎「${name}」`);
+          loadEngines();
+          loadEngineOptions();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          toast('删除失败: ' + (err.detail || `HTTP ${resp.status}`));
+        }
+      } catch (e) {
+        toast('删除异常: ' + e.message);
+      }
+    }
+
+    // 引擎编辑弹窗
+    let editingEngineId = null;
+    async function openEngineModal(id) {
+      editingEngineId = id || null;
+      $('engineModalTitle').textContent = id ? '编辑引擎' : '接入新引擎';
+      $('engineModalStatus').textContent = '';
+      $('engineModalStatus').className = 'text-xs';
+      $('engIdInput').disabled = !!id;
+      $('engNameInput').value = '';
+      $('engIdInput').value = '';
+      $('engBaseUrlInput').value = '';
+      $('engApiKeyInput').value = '';
+      $('engModelInput').value = '';
+      $('engPriceInInput').value = '';
+      $('engPriceOutInput').value = '';
+      $('engBalanceUrlInput').value = '';
+      $('engineSaveActivateBtn').classList.toggle('hidden', !!id);
+      if (id) {
+        try {
+          const resp = await fetch('/api/providers');
+          const data = await resp.json();
+          const p = (data.providers || []).find(x => x.id === id);
+          if (p) {
+            $('engNameInput').value = p.name || '';
+            $('engIdInput').value = p.id || '';
+            $('engBaseUrlInput').value = p.base_url || '';
+            $('engModelInput').value = p.vision_model || '';
+            $('engPriceInInput').value = p.price_in ?? '';
+            $('engPriceOutInput').value = p.price_out ?? '';
+            $('engBalanceUrlInput').value = p.balance_url || '';
+          }
+        } catch (e) { console.error(e); }
+      }
+      $('engineModal').classList.remove('hidden');
+      $('engineModal').classList.add('flex');
+      $('engNameInput').focus();
+    }
+    function closeEngineModal() {
+      $('engineModal').classList.add('hidden');
+      $('engineModal').classList.remove('flex');
+    }
+    async function confirmEngineModal(activateAfter) {
+      const name = $('engNameInput').value.trim();
+      const id = $('engIdInput').value.trim();
+      const base_url = $('engBaseUrlInput').value.trim();
+      const api_key = $('engApiKeyInput').value.trim();
+      const vision_model = $('engModelInput').value.trim();
+      const price_in = $('engPriceInInput').value.trim();
+      const price_out = $('engPriceOutInput').value.trim();
+      const balance_url = $('engBalanceUrlInput').value.trim();
+      if (!name || !id || !base_url || !vision_model || (!api_key && !editingEngineId)) {
+        toast('名称、ID、接口地址、密钥、视觉模型名均不能为空！');
+        return;
+      }
+      const statusEl = $('engineModalStatus');
+      statusEl.className = 'text-xs text-inkMuted';
+      statusEl.textContent = activateAfter ? '保存并验证识图能力中...' : '保存中...';
+      try {
+        const resp = await fetch('/api/providers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id, name, base_url, vision_model,
+            api_key: api_key || undefined,
+            price_in: price_in === '' ? null : Number(price_in),
+            price_out: price_out === '' ? null : Number(price_out),
+            balance_url: balance_url || null,
+          })
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          statusEl.className = 'text-xs text-rose-500';
+          statusEl.textContent = '保存失败: ' + (err.detail || `HTTP ${resp.status}`);
+          return;
+        }
+        if (activateAfter) {
+          const act = await fetch('/api/providers/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+          });
+          const actData = await act.json();
+          statusEl.className = actData.success ? 'text-xs text-emerald-600' : 'text-xs text-rose-500';
+          statusEl.textContent = actData.message;
+          if (actData.success) {
+            closeEngineModal();
+            toast(`引擎「${name}」已启用`);
+          }
+        } else {
+          closeEngineModal();
+          toast(`引擎「${name}」已保存`);
+        }
+        loadEngines();
+        loadEngineOptions();
+        refreshBalance();
+      } catch (e) {
+        statusEl.className = 'text-xs text-rose-500';
+        statusEl.textContent = '保存异常: ' + e.message;
+      }
+    }
+
+    // ==================== 初始化 ====================
+    window.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('select').forEach(initCustomSelect);  // 所有原生下拉替换为自定义样式
+      applyPreferencesToForm();
+      refreshBalance();
+      loadEngineOptions();
+    });
+  </script>
+</body>
+</html>

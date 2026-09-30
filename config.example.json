@@ -1,0 +1,17 @@
+{
+  "deepseek_api_key": "sk-你的密钥",
+  "ocr_api_url": "http://你的OCR服务器:18082/ocr",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "sk-你的密钥",
+      "vision_model": "deepseek-chat",
+      "price_in": 1.0,
+      "price_out": 2.0,
+      "balance_url": "https://api.deepseek.com/user/balance"
+    }
+  ],
+  "active_provider": "deepseek"
+}
