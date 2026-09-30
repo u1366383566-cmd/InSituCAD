@@ -427,6 +427,24 @@ def vision_read_translate(grid_png_bytes, provider, target_lang, ocr_hints):
 # 词库缓存文件的并发保护：翻译线程与词库管理接口可能同时读写
 CACHE_LOCK = threading.Lock()
 
+# ==================== 词库键规则：翻译方向后缀 ====================
+# 方向隔离约定：译入中文用原文本身作键；译入其它语言用 "原文@@语言码"（如
+# "五金铰链@@it"）。解析与构造集中在这两个函数，server 与前端只消费不重复实现。
+def split_term_key(key):
+    """'原文@@ru' -> ('原文', 'ru')；无后缀或后缀不是合法语言码 -> ('原文', 'zh')。
+    校验语言码防止业务文本恰好含 '@@xx' 被误拆。"""
+    if isinstance(key, str) and "@@" in key:
+        original, _, lang = key.rpartition("@@")
+        if original and lang in LANG_NAMES:
+            return original, lang
+    return key, "zh"
+
+
+def make_term_key(original, direction):
+    """按翻译方向构造词库键：中文方向返回原文本身，其它方向加 @@语言码 后缀"""
+    direction = (direction or "zh").strip()
+    return original if direction == "zh" else f"{original}@@{direction}"
+
 
 def _read_cache_nolock():
     if os.path.exists(CACHE_FILE):
@@ -780,7 +798,7 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
             else:
                 original, dst = b['text'], None
             dst = (dst or '').strip()
-            ck = f"{original}@@{target_lang}" if (original and target_lang != 'zh') else original
+            ck = make_term_key(original, target_lang) if original else original
             # 词库中已有的词条（企业标准译法）强制覆盖模型译文
             if ck and ck in cache:
                 cached_v = str(term_zh(cache, ck, '')).strip()

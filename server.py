@@ -175,28 +175,44 @@ def get_terms(keyword: Optional[str] = None):
     items = []
     for k, v in cache.items():
         entry = cad_pdf_translator.normalize_entry(v)
-        if not kw or kw in k.lower() or kw in entry["zh"].lower() or kw in entry["category"].lower():
-            items.append({"en": k, **entry})
-    items.sort(key=lambda x: x["en"].lower())
+        original, direction = cad_pdf_translator.split_term_key(k)
+        # 检索覆盖：去后缀原文 / 译文 / 分类 / 方向码（@@ 后缀不再直接参与匹配）
+        if (not kw or kw in original.lower() or kw in entry["zh"].lower()
+                or kw in entry["category"].lower() or kw in direction.lower()):
+            items.append({"id": k, "en": original, "direction": direction,
+                          "direction_name": cad_pdf_translator.LANG_NAMES.get(direction, direction),
+                          **entry})
+    # 同原文多方向词条相邻排列
+    items.sort(key=lambda x: (x["en"].lower(), x["direction"]))
     return {"count": len(items), "terms": items}
 
 @app.post("/api/terms")
-def add_or_update_term(payload: Dict[str, str]):
-    en = payload.get("en", "").strip()
-    zh = payload.get("zh", "").strip()
-    category = payload.get("category", "").strip()
+def add_or_update_term(payload: Dict[str, Any]):
+    """新增/编辑词条。direction 为目标语言代码（zh=译入中文，默认）；
+    编辑时传 id（原始键），原文/方向变化会自动重映射到新键并删除旧键"""
+    en = str(payload.get("en", "")).strip()
+    zh = str(payload.get("zh", "")).strip()
+    category = str(payload.get("category", "")).strip()
+    old_id = str(payload.get("id", "") or "").strip()
+    direction = str(payload.get("direction", "") or "zh").strip() or "zh"
+    if direction != "zh" and direction not in cad_pdf_translator.LANG_NAMES:
+        direction = "zh"
     if not en or not zh:
-        raise HTTPException(status_code=400, detail="英文原词与中文翻译均不能为空")
+        raise HTTPException(status_code=400, detail="原文与译文均不能为空")
     cache = cad_pdf_translator.load_cache()
+    key = cad_pdf_translator.make_term_key(en, direction)
     # 保留已有使用次数；分类留空时沿用旧分类
-    entry = cad_pdf_translator.normalize_entry(cache.get(en)) if en in cache else {
+    base = old_id or key
+    entry = cad_pdf_translator.normalize_entry(cache.get(base)) if base in cache else {
         "zh": zh, "category": "", "count": 0, "updated_at": ""
     }
     entry["zh"] = zh
     if category or not entry["category"]:
         entry["category"] = category
     entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
-    cad_pdf_translator.save_cache({en: entry})
+    cad_pdf_translator.save_cache({key: entry})
+    if old_id and old_id != key:
+        cad_pdf_translator.delete_cache_term(old_id)
     return {"success": True, "message": f"已成功录入: {en} -> {zh}"}
 
 @app.post("/api/terms/batch-delete")
@@ -207,6 +223,20 @@ def batch_delete_terms(payload: Dict[str, Any]):
     deleted = cad_pdf_translator.delete_cache_terms([str(k) for k in keys])
     return {"success": True, "deleted": deleted}
 
+# 目标语言中文名 -> 代码 的反向映射（CSV 导入的方向列接受中文名或代码）
+LANG_CODE_BY_NAME = {v: k for k, v in cad_pdf_translator.LANG_NAMES.items()}
+
+
+def _normalize_direction(v) -> str:
+    """归一化导入数据里的目标语言：接受代码或中文名，非法/缺省回退 zh"""
+    d = str(v or "").strip()
+    if not d or d == "zh":
+        return "zh"
+    if d in cad_pdf_translator.LANG_NAMES:
+        return d
+    return LANG_CODE_BY_NAME.get(d, "zh")
+
+
 @app.get("/api/terms/export")
 def export_terms(format: str = "json"):
     cache = cad_pdf_translator.load_cache()
@@ -214,15 +244,18 @@ def export_terms(format: str = "json"):
         buf = io.StringIO()
         buf.write("\ufeff")  # BOM，方便 Excel 直接打开
         writer = csv.writer(buf)
-        writer.writerow(["英文原文", "中文译文", "分类", "使用次数", "更新时间"])
+        writer.writerow(["原文", "译文", "分类", "使用次数", "更新时间", "目标语言"])
         for k in sorted(cache.keys()):
             e = cad_pdf_translator.normalize_entry(cache[k])
-            writer.writerow([k, e["zh"], e["category"], e["count"], e["updated_at"]])
+            original, direction = cad_pdf_translator.split_term_key(k)
+            writer.writerow([original, e["zh"], e["category"], e["count"], e["updated_at"],
+                             cad_pdf_translator.LANG_NAMES.get(direction, direction)])
         return Response(
             content=buf.getvalue(),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=terms.csv"},
         )
+    # JSON 导出保持原始键字典（@@ 后缀原样保留），作为可无损回灌的备份格式
     return JSONResponse(
         content=cache,
         headers={"Content-Disposition": "attachment; filename=terms.json"},
@@ -232,8 +265,12 @@ def export_terms(format: str = "json"):
 def import_terms(payload: Dict[str, Any]):
     data = payload.get("data")
     if isinstance(data, dict):
-        pairs = [(str(k), str(v)) for k, v in data.items()]
-        incoming = [{"en": k, "zh": v, "category": ""} for k, v in pairs]
+        # 字典 = JSON 备份回灌：键是原始键（可能含 @@ 后缀），值兼容旧纯字符串与结构化两种
+        incoming = []
+        for k, v in data.items():
+            e = cad_pdf_translator.normalize_entry(v)
+            incoming.append({"en": k, "zh": e["zh"], "category": e["category"],
+                             "count": e["count"], "updated_at": e["updated_at"]})
     elif isinstance(data, list):
         incoming = data
     else:
@@ -245,19 +282,28 @@ def import_terms(payload: Dict[str, Any]):
     for row in incoming:
         if not isinstance(row, dict):
             continue
-        en = str(row.get("en") or row.get("英文原文") or "").strip()
-        zh = str(row.get("zh") or row.get("中文译文") or "").strip()
+        # 兼容新旧表头：原文(新)/英文原文、en(旧)；译文(新)/中文译文、zh(旧)
+        en = str(row.get("en") or row.get("原文") or row.get("英文原文") or "").strip()
+        zh = str(row.get("zh") or row.get("译文") or row.get("中文译文") or "").strip()
         category = str(row.get("category") or row.get("分类") or "").strip()
+        direction = _normalize_direction(row.get("direction") or row.get("目标语言") or row.get("方向"))
         if not en or not zh:
             continue
-        entry = cad_pdf_translator.normalize_entry(cache.get(en)) if en in cache else {
+        key = cad_pdf_translator.make_term_key(en, direction)
+        entry = cad_pdf_translator.normalize_entry(cache.get(key)) if key in cache else {
             "zh": zh, "category": "", "count": 0, "updated_at": ""
         }
         entry["zh"] = zh
         if category:
             entry["category"] = category
-        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
-        merged[en] = entry
+        # 备份回灌时沿用文件里的使用次数与更新时间（若有）
+        if row.get("count") is not None:
+            try:
+                entry["count"] = int(row.get("count") or 0)
+            except Exception:
+                pass
+        entry["updated_at"] = str(row.get("updated_at") or "") or time.strftime("%Y-%m-%d %H:%M")
+        merged[key] = entry
         imported += 1
     if merged:
         cad_pdf_translator.save_cache(merged)

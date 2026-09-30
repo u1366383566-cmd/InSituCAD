@@ -15,5 +15,6 @@ __pycache__/
 
 # 本地工具与日志
 .zcode/
+.zcodeignore
 _tmp_check.js
 *.log

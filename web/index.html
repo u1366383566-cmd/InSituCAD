@@ -353,7 +353,7 @@
           <div class="flex items-center gap-3 mb-4 flex-wrap">
             <div class="relative flex-1 min-w-[200px] max-w-xs">
               <svg class="w-4 h-4 text-slate-300 absolute left-3 top-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              <input type="text" id="termSearchInput" oninput="onTermSearch()" placeholder="搜索术语、译文或分类"
+              <input type="text" id="termSearchInput" oninput="onTermSearch()" placeholder="搜索原文、译文、分类或方向"
                      class="w-full bg-slate-50/60 border border-lineLight rounded-xl pl-9 pr-3 py-2 text-xs text-inkTitle placeholder-inkMuted focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
             </div>
             <div class="flex items-center gap-2 ml-auto">
@@ -386,8 +386,8 @@
               <thead class="bg-slate-50/80 text-slate-500 sticky top-0">
                 <tr class="border-b border-slate-100">
                   <th class="px-4 py-3 w-10"><input type="checkbox" id="checkAll" onchange="toggleCheckAll(this)" class="accent-blue-600 rounded"></th>
-                  <th class="px-4 py-3 font-medium">英文原文</th>
-                  <th class="px-4 py-3 font-medium">中文译文</th>
+                  <th class="px-4 py-3 font-medium">原文</th>
+                  <th class="px-4 py-3 font-medium">译文</th>
                   <th class="px-4 py-3 font-medium">分类</th>
                   <th class="px-4 py-3 font-medium w-20">使用次数</th>
                   <th class="px-4 py-3 font-medium w-32">更新时间</th>
@@ -559,24 +559,50 @@
       </div>
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-medium text-inkBody mb-1">英文原文</label>
-          <input type="text" id="modalEnInput" placeholder="如: Soft-close undermount slide" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-inkBody mb-1">中文译文</label>
-          <input type="text" id="modalZhInput" placeholder="如: 阻尼缓冲托底滑轨" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-inkBody mb-1">分类（可选）</label>
-          <input type="text" id="modalCategoryInput" list="categorySuggestions" placeholder="选择或输入分类"
+          <label class="block text-xs font-medium text-inkBody mb-1">原文（英文、意大利语、越南语等任意语言）</label>
+          <input type="text" id="modalEnInput" placeholder="图纸上出现的原文，如: Soft-close undermount slide / Mobili su misura"
                  class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
-          <datalist id="categorySuggestions">
-            <option value="家具设计"></option>
-            <option value="建筑设计"></option>
-            <option value="机电照明"></option>
-            <option value="五金材料"></option>
-            <option value="其他"></option>
-          </datalist>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-inkBody mb-1">译文（对应所选目标语言）</label>
+          <input type="text" id="modalZhInput" placeholder="如: 阻尼缓冲托底滑轨（目标语言=中文时）"
+                 class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-inkBody mb-1">目标语言</label>
+            <select id="modalDirSelect" class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+              <option value="zh" selected>中文</option>
+              <option value="zh-TW">中文（繁）</option>
+              <option value="en">English</option>
+              <option value="it">Italiano</option>
+              <option value="ru">Русский</option>
+              <option value="ja">日本語</option>
+              <option value="ko">한국어</option>
+              <option value="vi">Tiếng Việt</option>
+              <option value="es">Español</option>
+              <option value="fr">Français</option>
+              <option value="de">Deutsch</option>
+              <option value="pt">Português</option>
+              <option value="id">Bahasa Indonesia</option>
+              <option value="tr">Türkçe</option>
+              <option value="th">ไทย</option>
+              <option value="ar">العربية</option>
+            </select>
+            <p class="text-[10px] text-inkMuted mt-1">决定词条生效的翻译方向；非中文方向在翻译对应语言时强制套用</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-inkBody mb-1">分类（可选）</label>
+            <input type="text" id="modalCategoryInput" list="categorySuggestions" placeholder="选择或输入分类"
+                   class="w-full bg-slate-50/60 border border-lineLight rounded-xl px-3 py-2.5 text-xs text-inkTitle focus:outline-none focus:border-blue-400 focus:bg-white transition-all">
+            <datalist id="categorySuggestions">
+              <option value="家具设计"></option>
+              <option value="建筑设计"></option>
+              <option value="机电照明"></option>
+              <option value="五金材料"></option>
+              <option value="其他"></option>
+            </datalist>
+          </div>
         </div>
       </div>
       <div class="flex justify-end gap-2 pt-1">
@@ -1274,9 +1300,12 @@
       return cachedTerms.filter(t => {
         if (termFilterCategory && (t.category || '') !== termFilterCategory) return false;
         if (!kw) return true;
+        // 方向检索覆盖中文名（意大利语）与本族名/代码（Italiano / it）
+        const dirBlob = [t.direction_name, LANG_NAMES[t.direction], t.direction].join(' ').toLowerCase();
         return (t.en || '').toLowerCase().includes(kw)
           || (t.zh || '').toLowerCase().includes(kw)
-          || (t.category || '').toLowerCase().includes(kw);
+          || (t.category || '').toLowerCase().includes(kw)
+          || dirBlob.includes(kw);
       });
     }
 
@@ -1324,7 +1353,7 @@
       pageList.forEach(t => {
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-slate-50/70 transition-colors';
-        const checked = selectedTerms.has(t.en);
+        const checked = selectedTerms.has(t.id);
 
         const tdCheck = document.createElement('td');
         tdCheck.className = 'px-4 py-3';
@@ -1333,18 +1362,30 @@
         cb.className = 'accent-blue-600 rounded';
         cb.checked = checked;
         cb.addEventListener('change', () => {
-          cb.checked ? selectedTerms.add(t.en) : selectedTerms.delete(t.en);
+          cb.checked ? selectedTerms.add(t.id) : selectedTerms.delete(t.id);
           updateBatchBar();
         });
         tdCheck.appendChild(cb);
 
+        // 原文单元格：干净原文 + 非中文方向的翻译方向小徽标（id 才是词条唯一标识）
         const tdEn = document.createElement('td');
-        tdEn.className = 'px-4 py-3 font-mono font-medium text-inkTitle';
-        tdEn.textContent = t.en;
+        tdEn.className = 'px-4 py-3 min-w-0';
+        const enText = document.createElement('p');
+        enText.className = 'font-mono font-medium text-inkTitle truncate max-w-[240px]';
+        enText.textContent = t.en || '-';
+        enText.title = t.en || '';
+        tdEn.appendChild(enText);
+        if (t.direction && t.direction !== 'zh') {
+          const dirChip = document.createElement('span');
+          dirChip.className = 'inline-flex items-center mt-1 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-50 border border-lineLight text-inkMuted';
+          dirChip.textContent = '→' + (t.direction_name || LANG_NAMES[t.direction] || t.direction);
+          tdEn.appendChild(dirChip);
+        }
 
         const tdZh = document.createElement('td');
-        tdZh.className = 'px-4 py-3 text-inkBody';
+        tdZh.className = 'px-4 py-3 text-inkBody truncate max-w-[240px]';
         tdZh.textContent = t.zh;
+        tdZh.title = t.zh || '';
 
         const tdCat = document.createElement('td');
         tdCat.className = 'px-4 py-3';
@@ -1373,12 +1414,12 @@
         editBtn.className = 'text-slate-400 hover:text-primary-600 transition-colors p-1';
         editBtn.title = '编辑';
         editBtn.innerHTML = '<svg class="w-3.5 h-3.5 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
-        editBtn.addEventListener('click', () => openTermModal(t.en));
+        editBtn.addEventListener('click', () => openTermModal(t.id));
         const delBtn = document.createElement('button');
         delBtn.className = 'text-slate-400 hover:text-rose-500 transition-colors p-1 ml-1';
         delBtn.title = '删除';
         delBtn.innerHTML = '<svg class="w-3.5 h-3.5 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
-        delBtn.addEventListener('click', () => deleteTerm(t.en));
+        delBtn.addEventListener('click', () => deleteTerm(t.id));
         tdOp.append(editBtn, delBtn);
 
         tr.append(tdCheck, tdEn, tdZh, tdCat, tdCount, tdTime, tdOp);
@@ -1407,7 +1448,7 @@
     function toggleCheckAll(el) {
       const list = filteredTerms();
       const pageList = list.slice((termPage - 1) * TERM_PAGE_SIZE, termPage * TERM_PAGE_SIZE);
-      pageList.forEach(t => el.checked ? selectedTerms.add(t.en) : selectedTerms.delete(t.en));
+      pageList.forEach(t => el.checked ? selectedTerms.add(t.id) : selectedTerms.delete(t.id));
       renderTerms();
     }
     function clearTermSelection() {
@@ -1425,17 +1466,22 @@
 
     // 词条弹窗
     let editingTermKey = null;
-    function openTermModal(en) {
-      editingTermKey = en || null;
-      $('termModalTitle').textContent = en ? '编辑词条' : '新建词条';
-      $('modalEnInput').value = en || '';
-      const item = en ? cachedTerms.find(t => t.en === en) : null;
+    function openTermModal(termId) {
+      editingTermKey = termId || null;
+      const item = termId ? cachedTerms.find(t => t.id === termId) : null;
+      $('termModalTitle').textContent = item ? '编辑词条' : '新建词条';
+      $('modalEnInput').value = item ? item.en : '';
       $('modalZhInput').value = item ? item.zh : '';
       $('modalCategoryInput').value = item ? (item.category || '') : '';
-      $('modalEnInput').disabled = !!en;
+      // 目标语言：编辑回显当前方向，新建默认中文
+      const dirSelect = $('modalDirSelect');
+      const dir = item && item.direction && [...dirSelect.options].some(o => o.value === item.direction)
+        ? item.direction : 'zh';
+      dirSelect.value = dir;
+      if (dirSelect._syncDD) dirSelect._syncDD();
       $('termModal').classList.remove('hidden');
       $('termModal').classList.add('flex');
-      (!$('modalEnInput').disabled ? $('modalEnInput') : $('modalZhInput')).focus();
+      $('modalEnInput').focus();
     }
     function closeTermModal() {
       $('termModal').classList.add('hidden');
@@ -1445,15 +1491,17 @@
       const en = $('modalEnInput').value.trim();
       const zh = $('modalZhInput').value.trim();
       const category = $('modalCategoryInput').value.trim();
+      const direction = $('modalDirSelect').value || 'zh';
       if (!en || !zh) {
-        toast('英文原文与中文译文均不能为空！');
+        toast('原文与译文均不能为空！');
         return;
       }
       try {
         const resp = await fetch('/api/terms', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ en, zh, category })
+          // 编辑时携带 id：原文/目标语言变化由服务端把词条重映射到新键
+          body: JSON.stringify({ en, zh, category, direction, id: editingTermKey || undefined })
         });
         if (resp.ok) {
           closeTermModal();
@@ -1517,22 +1565,30 @@
       if (!file) return;
       const reader = new FileReader();
       reader.onload = async () => {
-        const text = reader.result;
+        // 剥离 BOM：后端 CSV 导出带 BOM 头（方便 Excel），不剥会导致首列表头匹配失败
+        const text = String(reader.result || '').replace(/^\ufeff/, '');
         let data = null;
         try {
           data = JSON.parse(text);
         } catch (_) {
-          // 尝试 CSV（表头：英文原文/中文译文/分类 或 en/zh/category）
+          // 尝试 CSV（新表头：原文/译文/分类/目标语言；兼容旧表头：英文原文/中文译文/en/zh/category）
           const lines = text.split(/\r?\n/).filter(l => l.trim());
           if (lines.length >= 2) {
             const header = lines[0].split(',').map(h => h.trim().toLowerCase());
-            const iEn = header.indexOf('英文原文') >= 0 ? header.indexOf('英文原文') : header.indexOf('en');
-            const iZh = header.indexOf('中文译文') >= 0 ? header.indexOf('中文译文') : header.indexOf('zh');
-            const iCat = header.indexOf('分类') >= 0 ? header.indexOf('分类') : header.indexOf('category');
+            const pick = (...names) => {
+              for (const n of names) { const i = header.indexOf(n); if (i >= 0) return i; }
+              return -1;
+            };
+            const iEn = pick('原文', '英文原文', 'en');
+            const iZh = pick('译文', '中文译文', 'zh');
+            const iCat = pick('分类', 'category');
+            const iDir = pick('目标语言', '方向', 'direction');
             if (iEn >= 0 && iZh >= 0) {
               data = lines.slice(1).map(line => {
                 const cols = line.split(',');
-                return { en: (cols[iEn] || '').trim(), zh: (cols[iZh] || '').trim(), category: iCat >= 0 ? (cols[iCat] || '').trim() : '' };
+                const row = { en: (cols[iEn] || '').trim(), zh: (cols[iZh] || '').trim(), category: iCat >= 0 ? (cols[iCat] || '').trim() : '' };
+                if (iDir >= 0) row.direction = (cols[iDir] || '').trim();
+                return row;
               });
             }
           }
