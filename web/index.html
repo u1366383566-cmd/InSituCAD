@@ -947,7 +947,8 @@
 
     function setMode(mode) {
       currentMode = mode;
-      ['cad', 'doc', 'table'].forEach(m => {
+      // 模式列表从配置派生，新增模式只需加 MODE_CONFIG 项与对应按钮，不会再漏高亮
+      Object.keys(MODE_CONFIG).forEach(m => {
         const btn = $(`modeBtn-${m}`);
         btn.classList.toggle('bg-white', m === mode);
         btn.classList.toggle('shadow-sm', m === mode);
