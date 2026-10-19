@@ -9,6 +9,7 @@ CAD图纸专业翻译器 (基于 RapidOCR + DeepSeek 原位重构引擎)
   4. 旋转几何自适应归一化 (支持 0/90/180/270 度图纸)
   5. 实时统计 Token 消耗与精确费用，查询账户实时余额
   6. 兼容 Web 前端回调、页码范围抽翻、多模型动态切换
+  7. Excel 表格直翻 (process_xlsx)：单元格文字原位替换，图片/合并/样式/公式全保留
 """
 
 import sys
@@ -18,6 +19,7 @@ import json
 import time
 import base64
 import threading
+import openpyxl
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
@@ -300,6 +302,90 @@ def local_ocr(img, ocr):
         ys = [p[1] for p in box]
         out.append((min(xs), min(ys), max(xs), max(ys), t, float(score)))
     return out
+
+
+def extract_text_lines(page, min_chars=60):
+    """矢量 PDF 文字层直读：逐行精确提取翻译单元。
+    文本/位置/字号均为文件内精确值（零识别损耗），与 OCR 框同构。
+    返回 (units, alnum_chars)；有效字符量低于 min_chars 视为扫描件/图片页，
+    调用方回退 OCR+视觉路径。"""
+    units = []
+    alnum = 0
+    for blk in page.get_text("dict", sort=True)["blocks"]:
+        for ln in blk.get("lines", []):
+            txt = "".join(sp["text"] for sp in ln.get("spans", [])).strip()
+            if not txt:
+                continue
+            alnum += len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", txt))
+            if not is_translatable(txt):
+                continue
+            x0, y0, x1, y1 = ln["bbox"]
+            units.append({'rect': fitz.Rect(x0, y0, x1, y1),
+                          'px': (x0 / SCALE, y0 / SCALE, x1 / SCALE, y1 / SCALE),
+                          'text': txt,
+                          'line_h': y1 - y0, 'n_lines': 1})
+    if alnum < min_chars:
+        return [], alnum
+    return units, alnum
+
+
+def translate_text_blocks(text_map, provider, lang_name, batch_progress=None):
+    """文字层直读路径 / Excel 单元格共用的纯文本批量翻译：
+    {行下标: 原文} → (items, usage)。
+    items: [{id, original, translation, lang}]（与视觉读图返回同构，调用方逻辑一致）；
+    usage: {'prompt_tokens', 'completion_tokens'} 累计值。
+    每批 20 行控制模型输出长度；单批失败重试 3 次并打印日志，仍失败则该批
+    条目缺失（调用方按保持原文处理，覆盖率可从日志核对）。
+    batch_progress(done, total)：每批结束后回调（无论成败），供上层推进进度条。"""
+    url = provider['base_url'].rstrip('/') + '/chat/completions'
+    headers = {'Authorization': f"Bearer {provider['api_key']}", 'Content-Type': 'application/json'}
+    ids = sorted(text_map)
+    total_batches = (len(ids) + 19) // 20
+    done_batches = 0
+    usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+    out = []
+    for start in range(0, len(ids), 20):
+        batch = ids[start:start + 20]
+        payload_items = [{"id": k, "original": text_map[k]} for k in batch]
+        prompt = (
+            "你是资深的酒店家具定制与室内深化施工图专家。输入 JSON 数组的每个元素是建筑图纸上"
+            "的一行文字（可能是标注、说明段落的一行或表格单元格，相邻单元格是相互独立的短文本）。"
+            f"请将每个 original 翻译为{lang_name}；"
+            "若内容是纯数字、尺寸、型号代号、规范编号或代码，translation 保持原文不动；"
+            "lang 字段必须填 original 原文的语言两位小写代码（如 zh/en/ru），不是译文的语言；"
+            "严格输出与输入长度完全一致的 JSON 数组: "
+            "[{\"id\": 1, \"original\": \"...\", \"translation\": \"...\", \"lang\": \"en\"}]，"
+            "必须覆盖全部编号，一个都不能漏，不要输出任何其他解释。输入如下：\n"
+            + json.dumps(payload_items, ensure_ascii=False))
+        payload = {'model': provider['vision_model'], 'temperature': 0,
+                   'messages': [{'role': 'user', 'content': prompt}]}
+        if provider.get('disable_thinking'):
+            payload['thinking'] = {'type': 'disabled'}
+        for attempt in range(3):
+            try:
+                r = requests.post(url, headers=headers, json=payload, timeout=300)
+                r.raise_for_status()
+                data = r.json()
+                u = data.get('usage', {}) or {}
+                usage['prompt_tokens'] += u.get('prompt_tokens', 0)
+                usage['completion_tokens'] += u.get('completion_tokens', 0)
+                content = data['choices'][0]['message']['content']
+                try:
+                    arr = json.loads(content)
+                except Exception:
+                    m = re.search(r'\[.*\]', content, re.S)
+                    arr = json.loads(m.group(0)) if m else []
+                if isinstance(arr, list) and len(arr) == len(batch):
+                    out.extend(arr)
+                    break
+                print(f"  [文本翻译重试 {attempt+1}/3] 返回 {len(arr) if isinstance(arr, list) else 0}/{len(batch)} 条，数量不符")
+            except Exception as e:
+                print(f"  [文本翻译重试 {attempt+1}/3] {e}")
+                time.sleep(2)
+        done_batches += 1
+        if batch_progress:
+            batch_progress(done_batches, total_batches)
+    return out, usage
 
 
 # ==================== 源语言检测：视觉模型逐条报告 + 多数票汇总 ====================
@@ -713,6 +799,7 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
     hit_counts = {}
     new_entries = {}
     lang_votes = []
+    vector_pages = 0  # 文字层直读页数（矢量 PDF 跳过 OCR/识图）
     vlm_usage = {'prompt_tokens': 0, 'completion_tokens': 0}
     vlm_calls = 0
 
@@ -734,10 +821,20 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
         def inner(frac, msg):
             progress(base + weight * frac, f"原图第 {real_pno} 页: {msg}")
 
+        # --- 1) 翻译单元获取：文字层直读 + OCR 互补 ---
+        # 矢量图纸常见"混合"情况：标题/目录/图签用真字体（有文字层），密集正文与
+        # 表格是 SHX 轮廓字（文字层不可见，get_text 取不到）。因此两条通道都跑：
+        # 文字层单元零损耗直读；OCR 覆盖剩余区域，与文字层重叠的框去重丢弃
+        boxes, vec_chars = extract_text_lines(page)
+        vec_count = len(boxes)
+        if vec_count:
+            vector_pages += 1
+            print(f"  - 原图第 {real_pno} 页: 文字层直读 {vec_count} 行（{vec_chars} 字符）")
+
         pix = page.get_pixmap(dpi=DPI)
         img = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3]
 
-        # --- 1) 文字检测：远程优先，本地兜底 ---
+        # 文字检测：远程优先，本地兜底
         png = pix.tobytes('png')
         ocr_items = remote_ocr(png, ocr_api_url)
         if ocr_items is not None:
@@ -749,23 +846,55 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
             ocr_items = local_ocr(img, local_ocr_engine)
             ocr_engine_name = '本地RapidOCR'
 
-        boxes = []
+        ocr_boxes = []
         for (x0, y0, x1, y1, text, conf) in ocr_items:
             t = str(text).strip()
             if not is_translatable(t):
                 continue
             rect = fitz.Rect(x0 * SCALE, y0 * SCALE, x1 * SCALE, y1 * SCALE)
-            boxes.append({'rect': rect, 'text': t, 'px': (x0, y0, x1, y1)})
+            ocr_boxes.append({'rect': rect, 'text': t, 'px': (x0, y0, x1, y1)})
 
-        print(f"  - 原图第 {real_pno} 页: 检出 {len(boxes)} 项文字标注")
-        inner(0.15, f"检出 {len(boxes)} 项文字标注")
+        # 去重：OCR 框中心落在文字层单元内（外扩 2pt）的丢弃——该处已有精确文本，
+        # 保留只会以低质量识别覆盖高质量原文
+        vec_rects = [b['rect'] for b in boxes]
+        kept_ocr = []
+        for b in ocr_boxes:
+            c = fitz.Point((b['rect'].x0 + b['rect'].x1) / 2, (b['rect'].y0 + b['rect'].y1) / 2)
+            covered = any(fitz.Rect(r.x0 - 2, r.y0 - 2, r.x1 + 2, r.y1 + 2).contains(c) for r in vec_rects)
+            if not covered:
+                kept_ocr.append(b)
+        if len(kept_ocr) != len(ocr_boxes):
+            print(f"  - 原图第 {real_pno} 页: OCR {len(ocr_boxes)} 框，去除与文字层重叠 {len(ocr_boxes) - len(kept_ocr)} 个")
+        boxes = boxes + kept_ocr
+        inner(0.15, f"翻译单元：文字层 {vec_count} 行 + 识图 {len(kept_ocr)} 框")
 
-        # --- 2) 裁框拼网格 -> 视觉模型读字+翻译 ---
+        # --- 2) 翻译：文字层行→纯文本批量；SHX/图片区域→裁框网格视觉读图 ---
         vlm_results = {}
-        if boxes:
-            grids = build_grid_images(img, boxes)
+        if vec_count:
+            text_map = {i: boxes[i]['text'] for i in range(vec_count)}
+            items, text_usage = translate_text_blocks(text_map, provider, lang_name)
+            vlm_usage['prompt_tokens'] += text_usage.get('prompt_tokens', 0)
+            vlm_usage['completion_tokens'] += text_usage.get('completion_tokens', 0)
+            for it in items:
+                try:
+                    iid = int(it.get('id', -1))
+                except Exception:
+                    continue
+                if iid < 0 or iid >= vec_count:
+                    continue
+                original = str(it.get('original', '')).strip()
+                trans = str(it.get('translation', '')).strip()
+                if original:
+                    vlm_results[iid] = (original, trans)
+                    lang = normalize_lang_code(it.get('lang'))
+                    if lang:
+                        lang_votes.append(lang)
+            inner(0.5, f"文本翻译完成 {len(vlm_results)}/{vec_count} 行")
+        ocr_units = boxes[vec_count:]
+        if ocr_units:
+            grids = build_grid_images(img, ocr_units)
             for gi, (grid_png, id_map) in enumerate(grids):
-                hints = {i: boxes[bi]['text'] for i, bi in id_map.items()}
+                hints = {i: ocr_units[bi]['text'] for i, bi in id_map.items()}
                 items = []
                 for attempt in range(2):
                     try:
@@ -788,11 +917,11 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
                     original = str(it.get('original', '')).strip()
                     trans = str(it.get('translation', '')).strip()
                     if original:
-                        vlm_results[bi] = (original, trans)
+                        vlm_results[vec_count + bi] = (original, trans)
                         lang = normalize_lang_code(it.get('lang'))
                         if lang:
                             lang_votes.append(lang)
-                inner(0.2 + 0.5 * (gi + 1) / len(grids), f"视觉读图翻译 {gi+1}/{len(grids)} 组")
+                inner(0.5 + 0.4 * (gi + 1) / len(grids), f"视觉读图翻译 {gi+1}/{len(grids)} 组")
 
         # --- 3) 确定回填内容：企业词库强制优先 ---
         # 词库键按翻译方向隔离：非中文目标使用 "原文@@目标语言" 后缀键，
@@ -920,7 +1049,7 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
     summary = (
         "【翻译完成】\n"
         f"· 翻译引擎:       {engine_name} ({provider.get('vision_model')})\n"
-        f"· 文字检测:       {ocr_engine_name}\n"
+        f"· 文字获取:       {('文字层直读 ' + str(vector_pages) + ' 页 + ' + ocr_engine_name) if vector_pages and ocr_engine_name else ('文字层直读 ' + str(vector_pages) + ' 页' if vector_pages else (ocr_engine_name or '未检出文字'))}\n"
         f"· 处理图纸总页数: {total_pages} 页 (页码: {page_indices_1based})\n"
         f"· 成功原位替换:   {total_replaced} 处标注\n"
         f"· 视觉模型调用:   {vlm_calls} 次\n"
@@ -950,9 +1079,300 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
     }
 
 
+# ==================== Excel 表格直翻 ====================
+# 与 PDF 管线的本质区别：单元格文字是文件内的精确字符串，无需 OCR/视觉读图/
+# 擦除回填/字号反推。openpyxl 回环天然保留图片、合并、样式、行高列宽与公式，
+# 只把可译单元格的 .value 原位替换为译文即可实现"除语言外全版还原"。
+XLSM_EXTS = (".xlsx", ".xlsm")
+
+
+def is_translatable_cell(text):
+    """表格单元格翻译判定：含任意 Unicode 字母即参与翻译（比 is_translatable 宽，
+    「件」这类单字单位词也要翻）；纯数字/标点不进翻译队列。
+    已知边界：单元格内富文本（局部加粗）读取时摊平为统一格式。"""
+    t = str(text).strip()
+    return bool(t) and any(c.isalpha() for c in t)
+
+
+def excel_com_finalize(xlsx_path, preview_png_path):
+    """用本机 Excel 补全公式缓存值并导出首页预览图。
+    openpyxl 保存会丢失公式的上次计算结果——Excel/WPS 打开时自动重算无感，
+    但手机/网页等只读预览器不会重算，合计列会显示空白；让 Excel 本尊重算
+    另存一次兜底。未装 Excel 或调用失败一律跳过，不阻塞交付。
+    返回 (是否执行, 预览图路径或 None, 说明文本)。
+    已知边界：COM 调用无超时保护，弹窗类风险已用 DisplayAlerts/AutomationSecurity 规避。"""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        return False, None, "跳过（未安装 pywin32）"
+    tmp_pdf = xlsx_path + ".preview.pdf"
+    excel = None
+    try:
+        # 后台线程调用 COM 必须先初始化套间
+        pythoncom.CoInitialize()
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        try:
+            excel.AutomationSecurity = 3  # msoAutomationSecurityForceDisable，禁宏防弹窗
+        except Exception:
+            pass
+        wb = excel.Workbooks.Open(os.path.abspath(xlsx_path), UpdateLinks=0)
+        try:
+            excel.CalculateFullRebuild()
+        except Exception:
+            try:
+                excel.Calculate()
+            except Exception:
+                pass
+        wb.Save()
+        has_pdf = False
+        try:
+            # 仅为本轮预览临时调整首表打印方向（横向 + 缩放一页宽），
+            # 随后 Close(SaveChanges=False) 丢弃改动，交付文件的打印设置不受影响
+            ws = wb.Worksheets(1)
+            ws.PageSetup.Orientation = 2  # xlLandscape
+            ws.PageSetup.Zoom = False
+            ws.PageSetup.FitToPagesWide = 1
+            ws.PageSetup.FitToPagesTall = False
+        except Exception:
+            pass
+        try:
+            wb.ExportAsFixedFormat(0, os.path.abspath(tmp_pdf))  # 0 = xlTypePDF
+            has_pdf = os.path.exists(tmp_pdf)
+        except Exception:
+            pass
+        wb.Close(SaveChanges=False)
+        wb = None
+        preview_out = None
+        if has_pdf:
+            try:
+                doc = fitz.open(tmp_pdf)
+                doc[0].get_pixmap(dpi=150).save(preview_png_path)
+                preview_out = preview_png_path
+                doc.close()
+            except Exception:
+                preview_out = None
+        return True, preview_out, "Excel 重算完成" + ("，已生成预览图" if preview_out else "（预览导出失败）")
+    except Exception as e:
+        return False, None, f"跳过（Excel 调用失败: {e}），公式结果由打开文件的软件自动重算"
+    finally:
+        try:
+            if excel is not None:
+                excel.Quit()
+        except Exception:
+            pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(tmp_pdf):
+                os.remove(tmp_pdf)
+        except Exception:
+            pass
+
+
+def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=None, provider=None):
+    """
+    Excel 表格翻译主入口：收集可译单元格 -> 批量纯文本翻译（企业词库强制优先）
+    -> 原位回写 .value -> 保存 -> Excel COM 重算公式缓存值并导出预览图。
+    版面元素（图片/合并/样式/行高列宽/公式）不做任何改动。
+    provider 为任务开始时锁定的引擎快照，与 PDF 管线共用。
+    """
+    provider = provider or get_active_provider()
+    if not provider:
+        return {"success": False, "error": "未配置任何翻译引擎，请到「设置 → 翻译引擎」添加并启用"}
+    engine_name = provider.get('name', provider.get('id', '未知引擎'))
+    lang_name = LANG_NAMES.get(target_lang, target_lang)
+
+    print("\n" + "=" * 50)
+    print(f"正在处理 Excel 表格: {os.path.basename(input_path)}")
+    print(f"翻译引擎: {engine_name} ({provider.get('vision_model')}) | 目标语言: {lang_name}")
+    print(f"输出目标: {output_path}")
+    print("=" * 50)
+
+    try:
+        # .xlsm 保留宏工程；普通 .xlsx 不带 keep_vba
+        wb = openpyxl.load_workbook(input_path, keep_vba=input_path.lower().endswith(".xlsm"))
+    except Exception as e:
+        return {"success": False, "error": f"无法读取表格文件: {e}"}
+
+    def progress(frac, msg):
+        if progress_callback:
+            progress_callback(min(0.999, frac), msg)
+
+    # --- 1) 收集翻译单元：字符串单元格按 \n 拆行，每行一个单元（公式/数字/日期跳过） ---
+    cells = {}    # (sheet标题, 坐标) -> {'lines': [原行...], 'units': {行号: 全局id}}
+    text_map = {}  # 全局id -> 原文行
+    uid = 0
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if not isinstance(v, str) or not v.strip() or v.lstrip().startswith('='):
+                    continue
+                lines = v.split('\n')
+                unit_ids = {}
+                for li, line in enumerate(lines):
+                    if is_translatable_cell(line):
+                        unit_ids[li] = uid
+                        text_map[uid] = line.strip()
+                        uid += 1
+                if unit_ids:
+                    cells[(ws.title, cell.coordinate)] = {'lines': lines, 'units': unit_ids}
+    total_units = len(text_map)
+    sheet_count = len(wb.worksheets)
+    print(f"  - 共 {sheet_count} 个工作表，收集到 {total_units} 条可译文字（{len(cells)} 个单元格）")
+    progress(0.05, f"收集到 {total_units} 条可译文字")
+    if not total_units:
+        # 无可译内容也要走保存+COM 重算，保证产出文件公式缓存值完整
+        lang_votes = []
+        usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+        written = 0
+    else:
+        # --- 2) 批量纯文本翻译（复用 20 条/批 + 3 次重试） ---
+        lang_votes = []
+        results = {}  # 全局id -> (original, translation)
+        usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+
+        def on_batch(done, total):
+            progress(0.05 + 0.55 * done / total, f"批量翻译 {done}/{total} 批（共 {total_units} 条）")
+
+        items, usage = translate_text_blocks(text_map, provider, lang_name, batch_progress=on_batch)
+        for it in items:
+            try:
+                iid = int(it.get('id', -1))
+            except Exception:
+                continue
+            if iid not in text_map:
+                continue
+            original = str(it.get('original', '')).strip()
+            trans = str(it.get('translation', '')).strip()
+            if original:
+                results[iid] = (original, trans)
+                lang = normalize_lang_code(it.get('lang'))
+                if lang:
+                    lang_votes.append(lang)
+        print(f"  - 翻译返回 {len(results)}/{total_units} 条（缺失条目保持原文）")
+
+        # --- 3) 词库强制优先 + 原位回写（译文与原文相同则不动该行） ---
+        cache = load_cache()
+        hit_counts = {}
+        new_entries = {}
+        written = 0
+        for (sheet_title, coord), info in cells.items():
+            new_lines = list(info['lines'])
+            changed = False
+            for li, u in info['units'].items():
+                original, dst = results.get(u, (text_map[u], None))
+                dst = (dst or '').strip()
+                ck = make_term_key(original, target_lang)
+                if ck in cache:
+                    cached_v = str(term_zh(cache, ck, '')).strip()
+                    if cached_v and cached_v != original:
+                        dst = cached_v
+                if dst and dst != original and dst != new_lines[li].strip():
+                    new_lines[li] = dst
+                    changed = True
+                    hit_counts[ck] = hit_counts.get(ck, 0) + 1
+                    if ck not in cache:
+                        new_entries[ck] = {'zh': dst, 'category': '', 'count': 0,
+                                           'updated_at': time.strftime('%Y-%m-%d %H:%M')}
+            if changed:
+                wb[sheet_title][coord] = '\n'.join(new_lines)
+                written += 1
+        print(f"  - 成功原位替换 {written}/{len(cells)} 个单元格")
+
+    # 词库落盘：新词条合并写入 + 已有词条使用次数回写（与 PDF 流程同规则）
+    if total_units:
+        try:
+            if new_entries:
+                save_cache(new_entries)
+            bump_cache_counts(hit_counts)
+        except Exception as e:
+            print(f"  [缓存保存异常] {e}")
+
+    # --- 4) 保存（版面元素由 openpyxl 回环原样保留） ---
+    out_dir_path = os.path.dirname(output_path)
+    if out_dir_path:
+        os.makedirs(out_dir_path, exist_ok=True)
+    try:
+        wb.save(output_path)
+    except Exception as e:
+        return {"success": False, "error": f"保存译文表格失败: {e}"}
+    wb.close()
+    progress(0.75, "表格已保存")
+
+    # --- 5) Excel COM：重算公式缓存值 + 导出预览（无 Excel 则跳过，不阻塞） ---
+    progress(0.80, "调用 Excel 重算公式缓存值...")
+    preview_png = os.path.splitext(output_path)[0] + "_preview.png"
+    _, preview_png, com_msg = excel_com_finalize(output_path, preview_png)
+    print(f"  - {com_msg}")
+    progress(0.95, "收尾完成")
+
+    # 源语言检测：全部条目语言代码多数票（与 PDF 流程同规则）
+    source_lang = None
+    if lang_votes:
+        counts = {}
+        for lv in lang_votes:
+            counts[lv] = counts.get(lv, 0) + 1
+        source_lang = max(counts, key=counts.get)
+        print(f"  检测源语言: {source_lang} ({counts.get(source_lang, 0)}/{len(lang_votes)} 条)")
+
+    # 分引擎记账：单价未配置时只统计 Token 不算钱
+    total_cost = None
+    try:
+        price_in = provider.get('price_in')
+        price_out = provider.get('price_out')
+        if price_in is not None and price_out is not None:
+            total_cost = usage['prompt_tokens'] / 1e6 * float(price_in) \
+                + usage['completion_tokens'] / 1e6 * float(price_out)
+    except Exception:
+        total_cost = None
+
+    final_balance = None
+    if provider.get('balance_url'):
+        final_balance, _ = get_balance(provider.get('api_key'), provider.get('balance_url'))
+
+    summary = (
+        "【表格翻译完成】\n"
+        f"· 翻译引擎:       {engine_name} ({provider.get('vision_model')})\n"
+        f"· 工作表:         {sheet_count} 个\n"
+        f"· 成功翻译单元格: {written} 个（共 {total_units} 条文字）\n"
+        f"· 消耗 Token:     输入 {usage['prompt_tokens']} / 输出 {usage['completion_tokens']}\n"
+        f"· 实际消耗费用:   {('约 ￥%.4f 元' % total_cost) if total_cost is not None else '未配置单价，仅计 Token'}\n"
+    )
+    if final_balance is not None:
+        summary += f"· 账户最新余额:   ￥{final_balance:.2f} 元\n"
+    summary += f"· 公式重算:       {com_msg}\n"
+    summary += f"· 输出文件路径:   {output_path}"
+
+    print("\n" + "=" * 50)
+    print(summary)
+    print("=" * 50)
+    progress(1.0, "全部处理完成！")
+
+    return {
+        "success": True,
+        "output_xlsx": output_path,
+        "preview_png": preview_png,
+        "total_cells": written,
+        "total_units": total_units,
+        "sheets": sheet_count,
+        "total_cost": total_cost if total_cost is not None else 0.0,
+        "final_balance": final_balance,
+        "engine": engine_name,
+        "source_lang": source_lang,
+        "summary": summary
+    }
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python cad_pdf_translator.py <输入PDF路径> [输出PDF路径] [页码范围如: 18,22,81] [目标语言代码如: zh/en/ru]")
+        print("用法: python cad_pdf_translator.py <输入PDF或XLSX路径> [输出路径] [页码范围如: 18,22,81] [目标语言代码如: zh/en/ru]\n"
+              "      输入为 .xlsx/.xlsm 时走表格直翻（无页码参数）")
         sys.exit(1)
 
     inp = sys.argv[1]
@@ -969,11 +1389,18 @@ if __name__ == "__main__":
     if rest:
         target_lang = rest[0]
 
-    if out is None:
-        fname = os.path.splitext(os.path.basename(inp))[0]
-        out = os.path.join(BASE_DIR, "output", f"{fname}_{cad_output_suffix(target_lang)}.pdf")
-
-    res = process_pdf(inp, out, selected_pages=pages_arg, target_lang=target_lang)
+    if inp.lower().endswith(XLSM_EXTS):
+        # Excel 表格直翻：无页码概念，参数顺序为 [输出] [目标语言]
+        if out is None:
+            fname = os.path.splitext(os.path.basename(inp))[0]
+            out = os.path.join(BASE_DIR, "output",
+                               f"{fname}_{doc_output_suffix(target_lang, 'mono')}{os.path.splitext(inp)[1]}")
+        res = process_xlsx(inp, out, target_lang=target_lang)
+    else:
+        if out is None:
+            fname = os.path.splitext(os.path.basename(inp))[0]
+            out = os.path.join(BASE_DIR, "output", f"{fname}_{cad_output_suffix(target_lang)}.pdf")
+        res = process_pdf(inp, out, selected_pages=pages_arg, target_lang=target_lang)
     if not res.get("success"):
         print(f"[失败] {res.get('error')}")
         sys.exit(1)

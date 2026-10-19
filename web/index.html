@@ -113,7 +113,7 @@
             让每一张图纸，跨越语言边界
             <span class="hidden md:inline-block grad-bar w-20 h-2 rounded-full"></span>
           </h1>
-          <p class="text-sm text-inkMuted mt-3">上传 CAD 导出的 PDF，保留版式与专业术语。</p>
+          <p class="text-sm text-inkMuted mt-3">上传 CAD 图纸、文档 PDF 或 Excel 表格，保留版式与专业术语。</p>
         </div>
         <p class="hidden lg:block text-[11px] text-slate-300 tracking-[0.35em] whitespace-nowrap">更专业的图纸翻译，助力设计无国界</p>
       </div>
@@ -129,7 +129,7 @@
           <div class="bg-white border border-lineLight rounded-2xl p-5">
             <div class="mb-4">
               <h3 class="text-sm font-bold text-inkTitle">源文件</h3>
-              <p class="text-xs text-inkMuted mt-0.5">上传 CAD 导出的 PDF 文件</p>
+              <p class="text-xs text-inkMuted mt-0.5" id="sourceCardHint">上传 CAD 导出的 PDF 文件</p>
             </div>
             <div id="dropzone" onclick="document.getElementById('fileInput').click()"
                  ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)"
@@ -152,6 +152,7 @@
               <div class="flex items-center p-0.5 bg-slate-100 rounded-full text-xs">
                 <button id="modeBtn-cad" onclick="setMode('cad')" class="px-3 py-1 rounded-full bg-white shadow-sm text-primary-600 font-medium transition-all whitespace-nowrap">CAD 图纸</button>
                 <button id="modeBtn-doc" onclick="setMode('doc')" class="px-3 py-1 rounded-full text-slate-500 transition-all whitespace-nowrap">说明书画册</button>
+                <button id="modeBtn-table" onclick="setMode('table')" class="px-3 py-1 rounded-full text-slate-500 transition-all whitespace-nowrap">Excel 表格</button>
               </div>
             </div>
 
@@ -241,12 +242,16 @@
                 <div class="w-14 h-14 rounded-2xl bg-white border border-lineLight flex items-center justify-center text-slate-300 shadow-sm">
                   <svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
                 </div>
-                <p class="mt-4 text-sm text-inkMuted">上传文件后将自动生成译文预览</p>
+                <p class="mt-4 text-sm text-inkMuted" id="previewEmptyText">上传文件后将自动生成译文预览</p>
                 <p class="mt-1 text-xs text-slate-300">支持翻页 · 缩放 · 全屏查看</p>
               </div>
               <!-- PDF 画布 -->
               <div id="pdfWrap" class="hidden absolute inset-0 overflow-auto custom-scrollbar bg-slate-100/60 flex items-start justify-center p-4">
                 <canvas id="pdfCanvas" class="shadow-md rounded bg-white max-w-full"></canvas>
+              </div>
+              <!-- Excel 预览图（本机 Excel 导出的整表截图，单图查看无需分页控件） -->
+              <div id="xlsxPreviewWrap" class="hidden absolute inset-0 overflow-auto custom-scrollbar bg-slate-100/60 flex items-start justify-center p-4">
+                <img id="xlsxPreviewImg" class="shadow-md rounded bg-white max-w-full" alt="译文表格预览">
               </div>
             </div>
 
@@ -288,7 +293,7 @@
               <a id="downloadPdfBtn" href="#" target="_blank" download
                  class="shrink-0 px-4 py-2 bg-white border border-blue-200 text-primary-600 text-xs font-medium rounded-xl flex items-center gap-1.5 hover:bg-blue-50 transition-colors opacity-40 pointer-events-none">
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                下载译文 PDF
+                <span id="downloadBtnText">下载译文 PDF</span>
               </a>
             </div>
           </div>
@@ -911,19 +916,46 @@
     }
 
     // ==================== 翻译工作台 ====================
+    // 三模式差异集中配置：可上传扩展名 / 拖放区与按钮文案（下载按钮文案含下载译文类型）
+    const MODE_CONFIG = {
+      cad:   { accept: '.pdf', exts: ['pdf'], cardHint: '上传 CAD 导出的 PDF 文件',
+               dropTitle: '拖入或选择 CAD PDF', dropHint: '支持多页 PDF · 自动识别专业术语',
+               startBtn: '开始翻译', downloadBtn: '下载译文 PDF' },
+      doc:   { accept: '.pdf', exts: ['pdf'], cardHint: '上传文档 PDF 文件',
+               dropTitle: '拖入或选择文档 PDF', dropHint: '流式排版还原 · 保留原文插图',
+               startBtn: '开始文档翻译', downloadBtn: '下载译文 PDF' },
+      table: { accept: '.xlsx,.xlsm', exts: ['xlsx', 'xlsm'], cardHint: '上传 Excel 表格文件',
+               dropTitle: '拖入或选择 Excel 表格', dropHint: '支持 .xlsx / .xlsm · 图片样式公式全保留',
+               startBtn: '开始表格翻译', downloadBtn: '下载译文 Excel' }
+    };
+
+    function fileExtOf(name) {
+      return (name && name.includes('.') ? name.split('.').pop() : '').toLowerCase();
+    }
+
     function setMode(mode) {
       currentMode = mode;
-      $('modeBtn-cad').classList.toggle('bg-white', mode === 'cad');
-      $('modeBtn-cad').classList.toggle('shadow-sm', mode === 'cad');
-      $('modeBtn-cad').classList.toggle('text-primary-600', mode === 'cad');
-      $('modeBtn-cad').classList.toggle('text-slate-500', mode !== 'cad');
-      $('modeBtn-doc').classList.toggle('bg-white', mode === 'doc');
-      $('modeBtn-doc').classList.toggle('shadow-sm', mode === 'doc');
-      $('modeBtn-doc').classList.toggle('text-primary-600', mode === 'doc');
-      $('modeBtn-doc').classList.toggle('text-slate-500', mode !== 'doc');
+      ['cad', 'doc', 'table'].forEach(m => {
+        const btn = $(`modeBtn-${m}`);
+        btn.classList.toggle('bg-white', m === mode);
+        btn.classList.toggle('shadow-sm', m === mode);
+        btn.classList.toggle('text-primary-600', m === mode);
+        btn.classList.toggle('text-slate-500', m !== mode);
+      });
+      const cfg = MODE_CONFIG[mode];
       $('docOptions').classList.toggle('hidden', mode !== 'doc');
-      $('pageRangeWrap').classList.toggle('hidden', mode === 'doc');
-      $('startBtnText').textContent = mode === 'doc' ? '开始文档翻译' : '开始翻译';
+      $('pageRangeWrap').classList.toggle('hidden', mode !== 'cad');
+      $('fileInput').accept = cfg.accept;
+      $('sourceCardHint').textContent = cfg.cardHint;
+      $('fileNameDisplay').textContent = cfg.dropTitle;
+      const hintEl = $('fileSizeDisplay');
+      hintEl.textContent = cfg.dropHint;
+      hintEl.classList.remove('text-rose-500');
+      $('startBtnText').textContent = cfg.startBtn;
+      $('downloadBtnText').textContent = cfg.downloadBtn;
+      // 原选文件可能不符合新模式扩展名：清空已选并还原拖放区空状态
+      $('fileInput').value = '';
+      setFileSelectedUI(false);
     }
 
     function handleDragOver(e) {
@@ -946,14 +978,15 @@
       if (e.target.files.length > 0) updateFileDisplay(e.target.files[0]);
     }
     function updateFileDisplay(file) {
-      const ext = (file.name.includes('.') ? file.name.split('.').pop() : '').toLowerCase();
+      const ext = fileExtOf(file.name);
       const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
       $('fileNameDisplay').textContent = file.name;
-      if (ext === 'pdf') {
+      if (MODE_CONFIG[currentMode].exts.includes(ext)) {
         $('fileSizeDisplay').textContent = `${sizeMb} MB · 已就绪，点击下方按钮开始翻译`;
         $('fileSizeDisplay').classList.remove('text-rose-500');
       } else {
-        $('fileSizeDisplay').textContent = `格式 .${ext || '?'}（仅支持 PDF！）`;
+        const expect = currentMode === 'table' ? '仅支持 XLSX / XLSM！' : '仅支持 PDF！';
+        $('fileSizeDisplay').textContent = `格式 .${ext || '?'}（${expect}）`;
         $('fileSizeDisplay').classList.add('text-rose-500');
       }
       setFileSelectedUI(true);
@@ -1048,12 +1081,12 @@
     async function submitTranslation() {
       const fileInput = $('fileInput');
       if (!fileInput.files.length) {
-        toast('请先拖入或选择 PDF 文件！');
+        toast(currentMode === 'table' ? '请先拖入或选择 Excel 表格文件！' : '请先拖入或选择 PDF 文件！');
         return;
       }
       const file = fileInput.files[0];
-      if (!file.name.toLowerCase().endsWith('.pdf')) {
-        toast('仅支持 PDF 格式文件！');
+      if (!MODE_CONFIG[currentMode].exts.includes(fileExtOf(file.name))) {
+        toast(currentMode === 'table' ? '仅支持 XLSX / XLSM 格式文件！' : '仅支持 PDF 格式文件！');
         return;
       }
 
@@ -1066,6 +1099,9 @@
           formData.append('page_range', $('pageRangeInput').value);
           formData.append('target_lang', $('langSelect').value);
           resp = await fetch('/api/translate/cad', { method: 'POST', body: formData });
+        } else if (currentMode === 'table') {
+          formData.append('target_lang', $('langSelect').value);
+          resp = await fetch('/api/translate/table', { method: 'POST', body: formData });
         } else {
           formData.append('mode', document.querySelector('input[name="docMode"]:checked').value);
           formData.append('target_lang', $('langSelect').value);  // 文档模式同样使用目标语言选择
@@ -1161,10 +1197,21 @@
       clearInterval(currentTaskPollInterval);
       resetStartBtn();
       const r = task.result || {};
-      setStatus('bg-emerald-500', '翻译完成', `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
-      setDownloadEnabled(r.output_pdf);
+      const isTable = r.kind === 'table' || !!r.output_xlsx;
+      const outName = r.output_pdf || r.output_xlsx;
+      if (isTable) {
+        setStatus('bg-emerald-500', '翻译完成',
+          `共 ${r.sheets ?? '-'} 个工作表 · 翻译 ${r.total_cells ?? '-'} 个单元格 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
+      } else {
+        setStatus('bg-emerald-500', '翻译完成',
+          `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
+      }
+      setDownloadEnabled(outName);
       finishProgress();
-      if (r.output_pdf) loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
+      if (outName) {
+        if (isTable) loadXlsxPreview(r.preview_png ? `/api/preview/${encodeURIComponent(r.preview_png)}` : null);
+        else loadPdfPreview(`/api/download/${encodeURIComponent(outName)}`);
+      }
       refreshBalance();
     }
 
@@ -1224,8 +1271,38 @@
       pdfState.page = 1;
       pdfState.total = 0;
       $('previewEmpty').classList.remove('hidden');
+      $('previewEmptyText').textContent = '上传文件后将自动生成译文预览';
       $('pdfWrap').classList.add('hidden');
       $('pdfControls').classList.add('hidden');
+      const img = $('xlsxPreviewImg');
+      img.onerror = null;
+      img.removeAttribute('src');
+      $('xlsxPreviewWrap').classList.add('hidden');
+    }
+
+    function xlsxPreviewUnavailable() {
+      // 预览图缺失（本机无 Excel）或加载失败：退回空状态并提示下载查看
+      const img = $('xlsxPreviewImg');
+      img.onerror = null;
+      img.removeAttribute('src');
+      $('xlsxPreviewWrap').classList.add('hidden');
+      $('previewEmptyText').textContent = '本机未生成预览图，请下载译文文件查看';
+      $('previewEmpty').classList.remove('hidden');
+    }
+
+    async function loadXlsxPreview(previewUrl) {
+      // Excel 译文预览：COM 导出的 PNG 整表截图；无图时提示下载查看
+      $('previewEmpty').classList.add('hidden');
+      $('pdfWrap').classList.add('hidden');
+      $('pdfControls').classList.add('hidden');
+      const img = $('xlsxPreviewImg');
+      if (!previewUrl) {
+        xlsxPreviewUnavailable();
+        return;
+      }
+      $('xlsxPreviewWrap').classList.remove('hidden');
+      img.onerror = xlsxPreviewUnavailable;
+      img.src = previewUrl;
     }
 
     async function loadPdfPreview(url) {
@@ -1672,9 +1749,13 @@
         tdFile.className = 'px-4 py-3';
         const fileWrap = document.createElement('div');
         fileWrap.className = 'flex items-center gap-2';
+        // 文件图标按扩展名区分：Excel 译文青色 XLS，PDF 红色
+        const isXlsxFile = ['xlsx', 'xlsm'].includes(fileExtOf(r.filename));
         const fileIcon = document.createElement('span');
-        fileIcon.className = 'w-7 h-8 rounded bg-rose-50 border border-rose-100 text-rose-500 text-[8px] font-black flex items-center justify-center shrink-0';
-        fileIcon.textContent = 'PDF';
+        fileIcon.className = isXlsxFile
+          ? 'w-7 h-8 rounded bg-teal-50 border border-teal-100 text-teal-600 text-[8px] font-black flex items-center justify-center shrink-0'
+          : 'w-7 h-8 rounded bg-rose-50 border border-rose-100 text-rose-500 text-[8px] font-black flex items-center justify-center shrink-0';
+        fileIcon.textContent = isXlsxFile ? 'XLS' : 'PDF';
         const fileInfo = document.createElement('div');
         fileInfo.className = 'min-w-0';
         const fileName = document.createElement('p');
@@ -1698,7 +1779,9 @@
 
         const tdPages = document.createElement('td');
         tdPages.className = 'px-4 py-3 text-inkBody';
-        tdPages.textContent = r.pages != null ? r.pages + ' 页' : '-';
+        // 表格任务无页数概念：完成后以「N 格」展示成功翻译的单元格数
+        tdPages.textContent = r.pages != null ? r.pages + ' 页'
+          : (r.type === 'table' && r.status === 'completed' && r.total_replaced != null ? r.total_replaced + ' 格' : '-');
 
         const tdStatus = document.createElement('td');
         tdStatus.className = 'px-4 py-3';
@@ -1735,7 +1818,13 @@
         switchPage('workbench');
         setStatus('bg-emerald-500', '翻译完成', `项目「${r.project_name}」的历史成果`, false);
         setDownloadEnabled(r.output_pdf);
-        loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
+        // Excel 译文按输出名推导预览图名（{输出主名}_preview.png），缺失时自动回退为下载提示
+        if (r.type === 'table' || ['xlsx', 'xlsm'].includes(fileExtOf(r.output_pdf))) {
+          const guess = r.output_pdf.replace(/\.(xlsx|xlsm)$/i, '_preview.png');
+          loadXlsxPreview(`/api/preview/${encodeURIComponent(guess)}`);
+        } else {
+          loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
+        }
       } else if (r.status === 'failed') {
         toast('该任务翻译失败：' + (r.error || '未知原因'));
       } else {
@@ -2002,6 +2091,7 @@
     // ==================== 初始化 ====================
     window.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('select').forEach(initCustomSelect);  // 所有原生下拉替换为自定义样式
+      setMode(currentMode);  // 按模式配置归一化接受扩展名/文案（新增模式时与 HTML 初始态解耦）
       applyPreferencesToForm();
       refreshBalance();
       loadEngineOptions();

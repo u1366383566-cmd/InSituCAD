@@ -1,6 +1,6 @@
-# InSituCAD · AI Translation Workbench for CAD Drawings & Documents
+# InSituCAD · AI Translation Workbench for CAD Drawings, Documents & Spreadsheets
 
-A locally-deployed translation tool for architectural interior detailing and custom furniture industries: a **vision LLM reads drawings and translates them directly**, with translations **reflowed in-place** onto the CAD drawings. Regular PDF documents (brochures, manuals, contracts) are also supported with layout-preserving translation. Accessed via browser; the entire workflow runs on your machine or LAN.
+A locally-deployed translation tool for architectural interior detailing and custom furniture industries: a **vision LLM reads drawings and translates them directly**, with translations **reflowed in-place** onto the CAD drawings. Regular PDF documents (brochures, manuals, contracts) are also supported with layout-preserving translation, and Excel workbooks (.xlsx/.xlsm) are translated cell-by-cell with the full layout preserved. Accessed via browser; the entire workflow runs on your machine or LAN.
 
 > Note: The web UI is currently in Chinese. A future i18n release is planned.
 
@@ -8,6 +8,7 @@ A locally-deployed translation tool for architectural interior detailing and cus
 
 - **CAD drawing mode** — the vision LLM reads and translates in a single step, without depending on OCR text accuracy. Text-box detection uses a remote PaddleOCR service (optional) with local RapidOCR as fallback. 1:1 in-place erase-and-refill preserves the original geometry, and rotated annotation directions automatically follow the source drawing (0/90/180/270° pages).
 - **Brochure/manual mode** — powered by the optional [BabelDoc](https://github.com/funstory-ai/BabelDoc) flow-layout engine; outputs Chinese-only or English–Chinese bilingual versions.
+- **Excel spreadsheet mode** — cell texts are translated in place (no OCR needed: spreadsheet text is exact). Embedded images, merged cells, fonts/colors, row heights & column widths, formulas and macros are preserved untouched; on machines with Excel installed, formulas are recalculated via COM automation so totals also display in read-only previewers, and a PNG preview of the translated sheet is generated. Multi-line cells keep their line structure.
 - **Any source language** — annotations in English, Vietnamese, Thai, or any language supported by your chosen vision model are translated as-is, preserving diacritics and casing. The source language is auto-detected per task.
 - **Switch between any OpenAI-compatible engines** — plug in any OpenAI-compatible multimodal model service (DeepSeek, Zhipu, Qwen, SiliconFlow, local models, …). Each engine is verified with a live vision test before activation (text-only models are rejected). Switching engines never affects running tasks, and costs are tracked per engine.
 - **Terminology base** — categorized terms with automatic usage counters, JSON/CSV import & export. Approved corporate translations always override model output.
@@ -27,6 +28,8 @@ A locally-deployed translation tool for architectural interior detailing and cus
 pip install fastapi uvicorn pymupdf numpy opencv-python requests rapidocr_onnxruntime
 # Optional: BabelDoc engine for the brochure/manual mode
 pip install babeldoc
+# Optional: Excel mode (openpyxl required; pywin32 enables formula recalc + preview when Excel is installed)
+pip install openpyxl pywin32
 
 python server.py
 ```
@@ -54,7 +57,7 @@ Then open `http://127.0.0.1:7860`. LAN colleagues can use `http://<your-lan-ip>:
 
 ```
 ├── server.py                 # FastAPI backend (tasks, terms, engines, history)
-├── cad_pdf_translator.py     # CAD translation pipeline (detect → read+translate → in-place refill)
+├── cad_pdf_translator.py     # CAD translation pipeline (detect → read+translate → in-place refill) + Excel mode
 ├── web/index.html            # Single-page workbench frontend
 ├── design-system/            # UI design spec
 ├── 启动翻译工作台.bat          # Windows one-click launcher

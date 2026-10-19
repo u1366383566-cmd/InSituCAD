@@ -591,6 +591,150 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="任务不存在")
     return TASKS[task_id]
 
+# ==================== Excel 表格任务 ====================
+def run_table_task_worker(task_id: str, input_path: str, output_path: str, target_lang: str, provider: Dict[str, Any]):
+    """provider 为任务创建时锁定的引擎快照，中途切换引擎不影响本任务"""
+    def on_progress(frac: float, msg: str):
+        if task_id in TASKS:
+            TASKS[task_id]["progress"] = round(frac * 100, 1)
+            TASKS[task_id]["message"] = msg
+            append_log(task_id, f"[{round(frac*100)}%] {msg}")
+
+    try:
+        TASKS[task_id]["status"] = "processing"
+        res = cad_pdf_translator.process_xlsx(
+            input_path=input_path,
+            output_path=output_path,
+            target_lang=target_lang,
+            progress_callback=on_progress,
+            provider=provider
+        )
+        if res.get("success"):
+            out_name = os.path.basename(res["output_xlsx"])
+            TASKS[task_id]["status"] = "completed"
+            TASKS[task_id]["progress"] = 100.0
+            TASKS[task_id]["result"] = {
+                # output_pdf 与 output_xlsx 同值：前端下载/查看共用既有 output_pdf 路径，
+                # 按扩展名分流预览方式；kind 标记任务类型供前端区分文案
+                "output_xlsx": out_name,
+                "output_pdf": out_name,
+                "kind": "table",
+                "preview_png": os.path.basename(res["preview_png"]) if res.get("preview_png") else None,
+                "summary": res.get("summary", ""),
+                "sheets": res.get("sheets", 0),
+                "total_cells": res.get("total_cells", 0),
+                "total_cost": res.get("total_cost", 0.0),
+                "final_balance": res.get("final_balance")
+            }
+            TASKS[task_id]["message"] = "表格翻译与原位替换完成！"
+            update_history(
+                task_id,
+                status="completed",
+                pages=None,
+                output_pdf=out_name,
+                total_replaced=res.get("total_cells", 0),
+                total_cost=res.get("total_cost", 0.0),
+                source_lang=res.get("source_lang"),
+            )
+        else:
+            TASKS[task_id]["status"] = "failed"
+            TASKS[task_id]["error"] = res.get("error", "处理失败")
+            append_log(task_id, f"[ERROR] {TASKS[task_id]['error']}")
+            update_history(task_id, status="failed", error=TASKS[task_id]["error"])
+    except Exception as e:
+        TASKS[task_id]["status"] = "failed"
+        TASKS[task_id]["error"] = str(e)
+        append_log(task_id, f"[ERROR] {str(e)}")
+        update_history(task_id, status="failed", error=str(e))
+    finally:
+        TASKS[task_id]["finished_at"] = time.time()
+        cleanup_upload(input_path)
+
+@app.post("/api/translate/table")
+async def start_table_translation(
+    file: UploadFile = File(...),
+    target_lang: Optional[str] = Form("zh")
+):
+    task_id = str(uuid.uuid4())[:8]
+    clean_name = sanitize_upload_name(file.filename)
+    lower = clean_name.lower()
+    if lower.endswith(".xls"):
+        raise HTTPException(status_code=400, detail="不支持老版 .xls 格式，请先用 Excel 另存为 .xlsx 后上传")
+    if not lower.endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="请上传 Excel 表格文件（.xlsx / .xlsm）")
+    # 语言代码不在支持列表时按中文处理，与 CAD 端点一致
+    target_lang = target_lang if target_lang in cad_pdf_translator.LANG_NAMES else "zh"
+
+    prune_old_tasks()
+
+    save_path = os.path.join(UPLOAD_DIR, f"{task_id}_{clean_name}")
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    # 输出名与 PDF 流程同规则：{原名}_{语言}译文版.xlsx；同名并发时插入 task_id 防互踩
+    base = cad_pdf_translator.strip_translation_suffix(os.path.splitext(clean_name)[0])
+    suffix = cad_pdf_translator.doc_output_suffix(target_lang, "mono")
+    ext = ".xlsm" if lower.endswith(".xlsm") else ".xlsx"
+    out_name = f"{base}_{suffix}{ext}"
+    name_busy = any(
+        TASKS[tid].get("output_name") == out_name and TASKS[tid].get("status") in ("pending", "processing")
+        for tid in TASKS if tid != task_id
+    )
+    if name_busy:
+        out_name = f"{base}_{task_id}_{suffix}{ext}"
+    out_xlsx = os.path.join(OUTPUT_DIR, out_name)
+
+    # 引擎快照：任务开始时锁定，中途切换引擎不影响本任务
+    provider = cad_pdf_translator.get_active_provider()
+    if not provider:
+        raise HTTPException(status_code=400, detail="未配置任何翻译引擎，请到「设置 → 翻译引擎」添加并启用")
+
+    TASKS[task_id] = {
+        "id": task_id,
+        "type": "table",
+        "filename": clean_name,
+        "output_name": out_name,
+        "status": "pending",
+        "progress": 0.0,
+        "message": "任务已创建，正在排队执行...",
+        "logs": [f"已载入源文件: {clean_name}", f"翻译引擎: {provider.get('name')} ({provider.get('vision_model')})"],
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+        "finished_at": None
+    }
+
+    try:
+        file_size = os.path.getsize(save_path)
+    except Exception:
+        file_size = 0
+    append_history({
+        "id": task_id,
+        "type": "table",
+        "project_name": base,
+        "filename": clean_name,
+        "file_size": file_size,
+        "target_lang": target_lang,
+        "engine": provider.get("name"),
+        "source_lang": None,
+        "pages": None,
+        "status": "processing",
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "output_pdf": None,
+        "total_replaced": None,
+        "total_cost": None,
+    })
+
+    t = threading.Thread(
+        target=run_table_task_worker,
+        args=(task_id, save_path, out_xlsx, target_lang, provider)
+    )
+    t.daemon = True
+    t.start()
+
+    return {"task_id": task_id, "status": "pending"}
+
 # ==================== 常规文档任务 ====================
 def run_doc_task_worker(task_id: str, input_path: str, upload_base: str, out_base: str, mode: str, provider: Dict[str, Any], target_lang: str = "zh"):
     """provider 为任务创建时锁定的引擎快照（OpenAI 兼容协议）"""
@@ -749,11 +893,20 @@ def _safe_output_path(filename: str) -> Optional[str]:
         return None
     return target if os.path.isfile(target) else None
 
+# 按扩展名给出下载 MIME（PDF 与 Excel 译文共用下载通道，其余类型走二进制流）
+_DOWNLOAD_MIME_BY_EXT = {
+    ".pdf": "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".png": "image/png",
+}
+
 @app.get("/api/download/{filename}")
 def download_file(filename: str):
     target = _safe_output_path(filename)
     if target:
-        return FileResponse(target, filename=os.path.basename(target), media_type="application/pdf")
+        mime = _DOWNLOAD_MIME_BY_EXT.get(os.path.splitext(target)[1].lower(), "application/octet-stream")
+        return FileResponse(target, filename=os.path.basename(target), media_type=mime)
     raise HTTPException(status_code=404, detail="文件不存在")
 
 @app.get("/api/preview/{filename}")
