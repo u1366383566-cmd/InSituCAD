@@ -10,6 +10,7 @@ CAD图纸专业翻译器 (基于 RapidOCR + DeepSeek 原位重构引擎)
   5. 实时统计 Token 消耗与精确费用，查询账户实时余额
   6. 兼容 Web 前端回调、页码范围抽翻、多模型动态切换
   7. Excel 表格直翻 (process_xlsx)：单元格文字原位替换，图片/合并/样式/公式全保留
+  8. Word 文档直翻 (process_docx)：段落文字原位替换，样式/表格/编号/图片全保留
 """
 
 import sys
@@ -22,6 +23,7 @@ import base64
 import hashlib
 import threading
 import openpyxl
+import docx
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
@@ -1681,6 +1683,363 @@ def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=No
     }
 
 
+# ==================== Word 文档直翻 ====================
+# docx 与 xlsx 同属 OOXML（zip+XML），同样走"只动文字、版面数据零改动"路线：
+# 样式、编号列表、表格、图片锚点全部由 python-docx 原样保留，仅替换 run 文本。
+# 已知边界（v1）：文本框/SmartArt 内的文字不处理（保留原文）；老二进制 .doc 不支持。
+
+
+def _iter_docx_paragraphs(doc):
+    """遍历文档全部可翻译段落：正文（按文档顺序）+ 表格（含嵌套）+ 页眉页脚。
+    合并单元格在 python-docx 中会重复出现，按底层 tc 元素去重。"""
+    from docx.text.paragraph import Paragraph
+    from docx.table import Table
+    seen_cells = set()
+
+    def walk_table(table):
+        for row in table.rows:
+            for cell in row.cells:
+                if id(cell._tc) in seen_cells:
+                    continue
+                seen_cells.add(id(cell._tc))
+                for p in cell.paragraphs:
+                    yield p
+                for nested in cell.tables:
+                    yield from walk_table(nested)
+
+    for item in doc.iter_inner_content():
+        if isinstance(item, Paragraph):
+            yield item
+        elif isinstance(item, Table):
+            yield from walk_table(item)
+    for sec in doc.sections:
+        for part in (sec.header, sec.footer):
+            if part is None or part.is_linked_to_previous:
+                continue
+            for p in part.paragraphs:
+                yield p
+            for t in part.tables:
+                yield from walk_table(t)
+
+
+def _run_signature(run):
+    """run 的格式摘要：判断段内 run 是否同格式（加粗/斜体/下划线/字号/颜色/字体）"""
+    f = run.font
+    parts = []
+    if run.bold:
+        parts.append('b')
+    if run.italic:
+        parts.append('i')
+    if run.underline:
+        parts.append('u')
+    if f.size:
+        parts.append(f'sz{f.size.pt}')
+    try:
+        if f.color and f.color.rgb:
+            parts.append(f'c{f.color.rgb}')
+    except Exception:
+        pass
+    if f.name:
+        parts.append(f'f{f.name}')
+    return '|'.join(parts)
+
+
+def _paragraph_units(paragraph):
+    """把段落拆成 1~2 个翻译单位，返回 [(runs, text), ...]（runs 为该单位占用的
+    run 列表，text 为拼接原文）。
+    - 无文字/全段同格式/单 run：整段一个单位（译文用首非空 run 的格式）
+    - 首个非空 run 以冒号结尾（"注意：""解决方法："类标签）且后跟正文：
+      拆成标签 + 正文两个单位，各自写回原格式 run，加粗等格式保留
+    - 其余混格式段（中英夹排）：整段一个单位保翻译质量，局部中英字体差异摊平"""
+    runs = list(paragraph.runs)
+    nonempty = [r for r in runs if r.text.strip()]
+    if not nonempty:
+        return []
+    full_text = ''.join(r.text for r in runs)
+    if len(nonempty) > 1 and nonempty[0].text.rstrip().endswith(('：', ':')):
+        label_end = runs.index(nonempty[0])
+        label_text = ''.join(r.text for r in runs[:label_end + 1])
+        body_text = ''.join(r.text for r in runs[label_end + 1:])
+        if body_text.strip() and len(label_text.strip()) <= 30:
+            return [(runs[:label_end + 1], label_text),
+                    (runs[label_end + 1:], body_text)]
+    sigs = {_run_signature(r) for r in nonempty}
+    return [(runs, full_text)]
+
+
+def _write_docx_unit(runs, dst):
+    """译文写回：进字符数最多的非空 run（主格式，与原段整体视觉最一致，
+    避免开头短加粗标签把整段译文带成加粗），其余非空 run 清空。
+    只处理非空 run，空白 run（拼写检查切分残留）原样保留。"""
+    nonempty = [r for r in runs if r.text.strip()]
+    if not nonempty:
+        if runs:
+            runs[0].text = dst
+        return
+    target = max(nonempty, key=lambda r: len(r.text))
+    target.text = dst
+    for r in nonempty:
+        if r is not target:
+            r.text = ''
+
+
+def word_com_finalize(docx_path, preview_png_path):
+    """用本机 Word 导出译文首页预览图（COM → PDF → PNG）。
+    Word 直翻不产生公式缓存值问题，此步只为网页预览体验。
+    未装 Word 或失败一律跳过，不阻塞交付。返回 (是否执行, 预览图路径或 None, 说明)。"""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        return False, None, "跳过（未安装 pywin32）"
+    tmp_pdf = docx_path + ".preview.pdf"
+    word = None
+    try:
+        pythoncom.CoInitialize()
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        try:
+            word.AutomationSecurity = 3  # 禁宏，防 .docm 弹窗卡住后台任务
+        except Exception:
+            pass
+        doc = word.Documents.Open(os.path.abspath(docx_path), ReadOnly=True, AddToRecentFiles=False)
+        doc.ExportAsFixedFormat(os.path.abspath(tmp_pdf), 17)  # 17 = wdExportFormatPDF
+        doc.Close(SaveChanges=False)
+        doc = None
+        preview_out = None
+        if os.path.exists(tmp_pdf):
+            try:
+                d = fitz.open(tmp_pdf)
+                d[0].get_pixmap(dpi=150).save(preview_png_path)
+                preview_out = preview_png_path
+                d.close()
+            except Exception:
+                preview_out = None
+        return True, preview_out, "Word 预览导出完成" + ("，已生成预览图" if preview_out else "（预览导出失败）")
+    except Exception as e:
+        return False, None, f"跳过（Word 调用失败: {e}）"
+    finally:
+        try:
+            if word is not None:
+                word.Quit()
+        except Exception:
+            pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(tmp_pdf):
+                os.remove(tmp_pdf)
+        except Exception:
+            pass
+
+
+def _strip_cjk_numbering_literals(doc):
+    """剥除自动编号定义里的 CJK 字面量（如 lvlText "第%1节" → "%1"）。
+    自动编号前缀（"第1节"）不是段落文字，翻译管线碰不到；剥离后标题渲染为
+    "1 Operating Environment" 这类语言中立格式，避免译文里残留中文前缀。"""
+    try:
+        from docx.oxml.ns import qn
+        for part in doc.part.package.iter_parts():
+            if str(part.partname) != '/word/numbering.xml':
+                continue
+            el = getattr(part, 'element', None)
+            if el is None:
+                return
+            changed = 0
+            for lvl in el.iter(qn('w:lvlText')):
+                val = lvl.get(qn('w:val'))
+                if val and re.search(r'[\u4e00-\u9fff]', val):
+                    new = re.sub(r'[^\x00-\x7F]', '', val)
+                    if new and new != val:
+                        lvl.set(qn('w:val'), new)
+                        changed += 1
+            if changed:
+                print(f"  - 自动编号字面量剥除 CJK {changed} 处（如 第N节 → N）")
+    except Exception as e:
+        print(f"  [编号字面量处理跳过] {e}")
+
+
+def process_docx(input_path, output_path, target_lang="zh", progress_callback=None, provider=None):
+    """
+    Word 文档翻译主入口：遍历段落/表格/页眉页脚 -> 段落级翻译（词库强制优先）
+    -> run 原位写回 -> 保存 -> Word COM 导出首页预览图。
+    样式、编号列表、表格、图片由 python-docx 回环原样保留。
+    provider 为任务开始时锁定的引擎快照，与其他模式共用。
+    """
+    provider = provider or get_active_provider()
+    if not provider:
+        return {"success": False, "error": "未配置任何翻译引擎，请到「设置 → 翻译引擎」添加并启用"}
+    engine_name = provider.get('name', provider.get('id', '未知引擎'))
+    lang_name = LANG_NAMES.get(target_lang, target_lang)
+
+    print("\n" + "=" * 50)
+    print(f"正在处理 Word 文档: {os.path.basename(input_path)}")
+    print(f"翻译引擎: {engine_name} ({provider.get('vision_model')}) | 目标语言: {lang_name}")
+    print(f"输出目标: {output_path}")
+    print("=" * 50)
+
+    try:
+        doc = docx.Document(input_path)
+    except Exception as e:
+        return {"success": False, "error": f"无法读取 Word 文件: {e}"}
+    _strip_cjk_numbering_literals(doc)
+
+    def progress(frac, msg):
+        if progress_callback:
+            progress_callback(min(0.999, frac), msg)
+
+    # --- 1) 收集翻译单位（段落 -> 1~2 个单位） ---
+    text_map = {}
+    units = []       # (paragraph, runs, text, uid)
+    para_count = 0
+    for p in _iter_docx_paragraphs(doc):
+        p_units = _paragraph_units(p)
+        if not p_units:
+            continue
+        para_units = [(runs, text.strip()) for runs, text in p_units if is_translatable_cell(text)]
+        if not para_units:
+            continue
+        para_count += 1
+        for runs, text in para_units:
+            units.append((p, runs, text, len(text_map)))
+            text_map[len(text_map)] = text
+    total_units = len(units)
+    print(f"  - 收集到 {total_units} 条可译文字（{para_count} 个段落）")
+    progress(0.05, f"收集到 {total_units} 条可译文字")
+    if not total_units:
+        usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+        lang_votes = []
+        written = 0
+    else:
+        # --- 2) 批量翻译 + 词库强制优先 ---
+        lang_votes = []
+        translations = {}
+
+        def on_batch(done, total):
+            progress(0.05 + 0.55 * done / total, f"批量翻译 {done}/{total} 批（共 {total_units} 条）")
+
+        items, usage = translate_text_blocks(text_map, provider, lang_name, batch_progress=on_batch)
+        for it in items:
+            try:
+                iid = int(it.get('id', -1))
+            except Exception:
+                continue
+            if iid not in text_map:
+                continue
+            original = str(it.get('original', '')).strip()
+            trans = str(it.get('translation', '')).strip()
+            if original:
+                translations[iid] = trans
+                lang = normalize_lang_code(it.get('lang'))
+                if lang:
+                    lang_votes.append(lang)
+
+        cache = load_cache()
+        hit_counts = {}
+        new_entries = {}
+        for u, original in text_map.items():
+            dst = (translations.get(u) or '').strip()
+            ck = make_term_key(original, target_lang)
+            if ck in cache:
+                cached_v = str(term_zh(cache, ck, '')).strip()
+                if cached_v and cached_v != original:
+                    dst = cached_v
+            translations[u] = dst or None
+            if dst and dst != original:
+                hit_counts[ck] = hit_counts.get(ck, 0) + 1
+                if ck not in cache:
+                    new_entries[ck] = {'zh': dst, 'category': '', 'count': 0,
+                                       'updated_at': time.strftime('%Y-%m-%d %H:%M')}
+        try:
+            if new_entries:
+                save_cache(new_entries)
+            bump_cache_counts(hit_counts)
+        except Exception as e:
+            print(f"  [缓存保存异常] {e}")
+
+        # --- 3) run 原位写回（缺失译文单位保留原文，绝不出现空段） ---
+        written = 0
+        for p, runs, text, u in units:
+            dst = translations.get(u)
+            if not dst or dst == text:
+                continue
+            _write_docx_unit(runs, dst)
+            written += 1
+        print(f"  - 成功原位替换 {written}/{total_units} 条（缺失条目保持原文）")
+
+    # --- 4) 保存 ---
+    out_dir_path = os.path.dirname(output_path)
+    if out_dir_path:
+        os.makedirs(out_dir_path, exist_ok=True)
+    try:
+        doc.save(output_path)
+    except Exception as e:
+        return {"success": False, "error": f"保存译文 Word 失败: {e}"}
+    progress(0.75, "文档已保存")
+
+    # --- 5) Word COM 导出首页预览（无 Word 则跳过，不阻塞） ---
+    progress(0.80, "调用 Word 生成预览图...")
+    preview_png = os.path.splitext(output_path)[0] + "_preview.png"
+    _, preview_png, com_msg = word_com_finalize(output_path, preview_png)
+    print(f"  - {com_msg}")
+    progress(0.95, "收尾完成")
+
+    source_lang = None
+    if lang_votes:
+        counts = {}
+        for lv in lang_votes:
+            counts[lv] = counts.get(lv, 0) + 1
+        source_lang = max(counts, key=counts.get)
+        print(f"  检测源语言: {source_lang} ({counts.get(source_lang, 0)}/{len(lang_votes)} 条)")
+
+    total_cost = None
+    try:
+        price_in = provider.get('price_in')
+        price_out = provider.get('price_out')
+        if price_in is not None and price_out is not None:
+            total_cost = usage['prompt_tokens'] / 1e6 * float(price_in) \
+                + usage['completion_tokens'] / 1e6 * float(price_out)
+    except Exception:
+        total_cost = None
+
+    final_balance = None
+    if provider.get('balance_url'):
+        final_balance, _ = get_balance(provider.get('api_key'), provider.get('balance_url'))
+
+    summary = (
+        "【Word 翻译完成】\n"
+        f"· 翻译引擎:       {engine_name} ({provider.get('vision_model')})\n"
+        f"· 成功翻译段落:   {written} 条（共 {total_units} 条文字 / {para_count} 个段落）\n"
+        f"· 消耗 Token:     输入 {usage['prompt_tokens']} / 输出 {usage['completion_tokens']}\n"
+        f"· 实际消耗费用:   {('约 ￥%.4f 元' % total_cost) if total_cost is not None else '未配置单价，仅计 Token'}\n"
+    )
+    if final_balance is not None:
+        summary += f"· 账户最新余额:   ￥{final_balance:.2f} 元\n"
+    summary += f"· 预览:           {com_msg}\n"
+    summary += f"· 输出文件路径:   {output_path}"
+
+    print("\n" + "=" * 50)
+    print(summary)
+    print("=" * 50)
+    progress(1.0, "全部处理完成！")
+
+    return {
+        "success": True,
+        "output_docx": output_path,
+        "preview_png": preview_png,
+        "total_paragraphs": written,
+        "total_units": total_units,
+        "total_cost": total_cost if total_cost is not None else 0.0,
+        "final_balance": final_balance,
+        "engine": engine_name,
+        "source_lang": source_lang,
+        "summary": summary
+    }
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("用法: python cad_pdf_translator.py <输入PDF或XLSX路径> [输出路径] [页码范围如: 18,22,81] [目标语言代码如: zh/en/ru]\n"
@@ -1701,7 +2060,13 @@ if __name__ == "__main__":
     if rest:
         target_lang = rest[0]
 
-    if inp.lower().endswith(XLSM_EXTS):
+    if inp.lower().endswith(".docx"):
+        # Word 文档直翻：无页码概念，参数顺序为 [输出] [目标语言]
+        if out is None:
+            fname = os.path.splitext(os.path.basename(inp))[0]
+            out = os.path.join(BASE_DIR, "output", f"{fname}_{doc_output_suffix(target_lang, 'mono')}.docx")
+        res = process_docx(inp, out, target_lang=target_lang)
+    elif inp.lower().endswith(XLSM_EXTS):
         # Excel 表格直翻：无页码概念，参数顺序为 [输出] [目标语言]
         if out is None:
             fname = os.path.splitext(os.path.basename(inp))[0]

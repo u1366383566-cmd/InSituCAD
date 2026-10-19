@@ -153,6 +153,7 @@
                 <button id="modeBtn-cad" onclick="setMode('cad')" class="px-3 py-1 rounded-full bg-white shadow-sm text-primary-600 font-medium transition-all whitespace-nowrap">CAD 图纸</button>
                 <button id="modeBtn-doc" onclick="setMode('doc')" class="px-3 py-1 rounded-full text-slate-500 transition-all whitespace-nowrap">说明书画册</button>
                 <button id="modeBtn-table" onclick="setMode('table')" class="px-3 py-1 rounded-full text-slate-500 transition-all whitespace-nowrap">Excel 表格</button>
+                <button id="modeBtn-docx" onclick="setMode('docx')" class="px-3 py-1 rounded-full text-slate-500 transition-all whitespace-nowrap">Word 文档</button>
               </div>
             </div>
 
@@ -928,13 +929,16 @@
     const MODE_CONFIG = {
       cad:   { accept: '.pdf', exts: ['pdf'], cardHint: '上传 CAD 导出的 PDF 文件',
                dropTitle: '拖入或选择 CAD PDF', dropHint: '支持多页 PDF · 自动识别专业术语',
-               startBtn: '开始翻译', downloadBtn: '下载译文 PDF' },
+               startBtn: '开始翻译', downloadBtn: '下载译文 PDF', expectLabel: 'PDF' },
       doc:   { accept: '.pdf', exts: ['pdf'], cardHint: '上传文档 PDF 文件',
                dropTitle: '拖入或选择文档 PDF', dropHint: '流式排版还原 · 保留原文插图',
-               startBtn: '开始文档翻译', downloadBtn: '下载译文 PDF' },
+               startBtn: '开始文档翻译', downloadBtn: '下载译文 PDF', expectLabel: 'PDF' },
       table: { accept: '.xlsx,.xlsm', exts: ['xlsx', 'xlsm'], cardHint: '上传 Excel 表格文件',
                dropTitle: '拖入或选择 Excel 表格', dropHint: '支持 .xlsx / .xlsm · 图片样式公式全保留',
-               startBtn: '开始表格翻译', downloadBtn: '下载译文 Excel' }
+               startBtn: '开始表格翻译', downloadBtn: '下载译文 Excel', expectLabel: 'XLSX / XLSM' },
+      docx:  { accept: '.docx', exts: ['docx'], cardHint: '上传 Word 文档',
+               dropTitle: '拖入或选择 Word 文档', dropHint: '支持 .docx · 样式表格图片全保留',
+               startBtn: '开始 Word 翻译', downloadBtn: '下载译文 Word', expectLabel: 'DOCX' }
     };
 
     function fileExtOf(name) {
@@ -994,8 +998,8 @@
         $('fileSizeDisplay').textContent = `${sizeMb} MB · 已就绪，点击下方按钮开始翻译`;
         $('fileSizeDisplay').classList.remove('text-rose-500');
       } else {
-        const expect = currentMode === 'table' ? '仅支持 XLSX / XLSM！' : '仅支持 PDF！';
-        $('fileSizeDisplay').textContent = `格式 .${ext || '?'}（${expect}）`;
+        const expect = MODE_CONFIG[currentMode].expectLabel;
+        $('fileSizeDisplay').textContent = `格式 .${ext || '?'}（仅支持 ${expect}！）`;
         $('fileSizeDisplay').classList.add('text-rose-500');
       }
       setFileSelectedUI(true);
@@ -1090,12 +1094,12 @@
     async function submitTranslation() {
       const fileInput = $('fileInput');
       if (!fileInput.files.length) {
-        toast(currentMode === 'table' ? '请先拖入或选择 Excel 表格文件！' : '请先拖入或选择 PDF 文件！');
+        toast('请先拖入或选择文件！');
         return;
       }
       const file = fileInput.files[0];
       if (!MODE_CONFIG[currentMode].exts.includes(fileExtOf(file.name))) {
-        toast(currentMode === 'table' ? '仅支持 XLSX / XLSM 格式文件！' : '仅支持 PDF 格式文件！');
+        toast(`仅支持 ${MODE_CONFIG[currentMode].expectLabel} 格式文件！`);
         return;
       }
 
@@ -1112,6 +1116,9 @@
           formData.append('target_lang', $('langSelect').value);
           formData.append('translate_images', $('imageTranslateToggle').checked);
           resp = await fetch('/api/translate/table', { method: 'POST', body: formData });
+        } else if (currentMode === 'docx') {
+          formData.append('target_lang', $('langSelect').value);
+          resp = await fetch('/api/translate/docx', { method: 'POST', body: formData });
         } else {
           formData.append('mode', document.querySelector('input[name="docMode"]:checked').value);
           formData.append('target_lang', $('langSelect').value);  // 文档模式同样使用目标语言选择
@@ -1208,11 +1215,15 @@
       resetStartBtn();
       const r = task.result || {};
       const isTable = r.kind === 'table' || !!r.output_xlsx;
-      const outName = r.output_pdf || r.output_xlsx;
+      const isDocx = r.kind === 'docx' || !!r.output_docx;
+      const outName = r.output_pdf || r.output_xlsx || r.output_docx;
       if (isTable) {
         const imgPart = r.images_translated != null ? ` · 图片内文字 ${r.images_translated} 张` : '';
         setStatus('bg-emerald-500', '翻译完成',
           `共 ${r.sheets ?? '-'} 个工作表 · 翻译 ${r.total_cells ?? '-'} 个单元格${imgPart} · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
+      } else if (isDocx) {
+        setStatus('bg-emerald-500', '翻译完成',
+          `翻译 ${r.total_paragraphs ?? '-'} 条段落 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
       } else {
         setStatus('bg-emerald-500', '翻译完成',
           `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
@@ -1220,7 +1231,8 @@
       setDownloadEnabled(outName);
       finishProgress();
       if (outName) {
-        if (isTable) loadXlsxPreview(r.preview_png ? `/api/preview/${encodeURIComponent(r.preview_png)}` : null);
+        // Word/Excel 译文用 COM 导出的 PNG 整页预览；PDF 走 pdf.js 通道
+        if (isTable || isDocx) loadXlsxPreview(r.preview_png ? `/api/preview/${encodeURIComponent(r.preview_png)}` : null);
         else loadPdfPreview(`/api/download/${encodeURIComponent(outName)}`);
       }
       refreshBalance();
@@ -1760,13 +1772,17 @@
         tdFile.className = 'px-4 py-3';
         const fileWrap = document.createElement('div');
         fileWrap.className = 'flex items-center gap-2';
-        // 文件图标按扩展名区分：Excel 译文青色 XLS，PDF 红色
-        const isXlsxFile = ['xlsx', 'xlsm'].includes(fileExtOf(r.filename));
+        // 文件图标按扩展名区分：Excel 译文青色 XLS、Word 蓝色 DOC、PDF 红色
+        const fileExt = fileExtOf(r.filename);
+        const isXlsxFile = ['xlsx', 'xlsm'].includes(fileExt);
+        const isDocxFile = fileExt === 'docx';
         const fileIcon = document.createElement('span');
-        fileIcon.className = isXlsxFile
-          ? 'w-7 h-8 rounded bg-teal-50 border border-teal-100 text-teal-600 text-[8px] font-black flex items-center justify-center shrink-0'
-          : 'w-7 h-8 rounded bg-rose-50 border border-rose-100 text-rose-500 text-[8px] font-black flex items-center justify-center shrink-0';
-        fileIcon.textContent = isXlsxFile ? 'XLS' : 'PDF';
+        fileIcon.className = isDocxFile
+          ? 'w-7 h-8 rounded bg-blue-50 border border-blue-100 text-blue-600 text-[8px] font-black flex items-center justify-center shrink-0'
+          : isXlsxFile
+            ? 'w-7 h-8 rounded bg-teal-50 border border-teal-100 text-teal-600 text-[8px] font-black flex items-center justify-center shrink-0'
+            : 'w-7 h-8 rounded bg-rose-50 border border-rose-100 text-rose-500 text-[8px] font-black flex items-center justify-center shrink-0';
+        fileIcon.textContent = isDocxFile ? 'DOC' : (isXlsxFile ? 'XLS' : 'PDF');
         const fileInfo = document.createElement('div');
         fileInfo.className = 'min-w-0';
         const fileName = document.createElement('p');
@@ -1790,9 +1806,10 @@
 
         const tdPages = document.createElement('td');
         tdPages.className = 'px-4 py-3 text-inkBody';
-        // 表格任务无页数概念：完成后以「N 格」展示成功翻译的单元格数
+        // 表格任务无页数概念：完成后以「N 格」展示成功翻译的单元格数；Word 以「N 段」
         tdPages.textContent = r.pages != null ? r.pages + ' 页'
-          : (r.type === 'table' && r.status === 'completed' && r.total_replaced != null ? r.total_replaced + ' 格' : '-');
+          : (r.type === 'table' && r.status === 'completed' && r.total_replaced != null ? r.total_replaced + ' 格'
+            : (r.type === 'docx' && r.status === 'completed' && r.total_replaced != null ? r.total_replaced + ' 段' : '-'));
 
         const tdStatus = document.createElement('td');
         tdStatus.className = 'px-4 py-3';
@@ -1829,9 +1846,10 @@
         switchPage('workbench');
         setStatus('bg-emerald-500', '翻译完成', `项目「${r.project_name}」的历史成果`, false);
         setDownloadEnabled(r.output_pdf);
-        // Excel 译文按输出名推导预览图名（{输出主名}_preview.png），缺失时自动回退为下载提示
-        if (r.type === 'table' || ['xlsx', 'xlsm'].includes(fileExtOf(r.output_pdf))) {
-          const guess = r.output_pdf.replace(/\.(xlsx|xlsm)$/i, '_preview.png');
+        // Excel/Word 译文按输出名推导预览图名（{输出主名}_preview.png），缺失时自动回退为下载提示
+        const ext = fileExtOf(r.output_pdf);
+        if (r.type === 'table' || r.type === 'docx' || ['xlsx', 'xlsm', 'docx'].includes(ext)) {
+          const guess = r.output_pdf.replace(/\.(xlsx|xlsm|docx)$/i, '_preview.png');
           loadXlsxPreview(`/api/preview/${encodeURIComponent(guess)}`);
         } else {
           loadPdfPreview(`/api/download/${encodeURIComponent(r.output_pdf)}`);
