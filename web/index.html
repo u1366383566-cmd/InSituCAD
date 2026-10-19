@@ -171,6 +171,14 @@
               </div>
             </div>
 
+            <!-- 表格模式：图片文字翻译开关 -->
+            <div id="tableOptions" class="hidden mb-4">
+              <label class="flex items-center gap-2 p-2.5 border border-slate-200 rounded-xl cursor-pointer has-checked:border-blue-400 has-checked:bg-blue-50/40 transition-all">
+                <input type="checkbox" id="imageTranslateToggle" checked class="accent-blue-600">
+                <span class="text-xs text-inkBody">同时翻译图片内嵌文字（材质卡、尺寸标注等，照片不受影响）</span>
+              </label>
+            </div>
+
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="block text-xs text-inkBody mb-1.5">目标语言</label>
@@ -944,6 +952,7 @@
       });
       const cfg = MODE_CONFIG[mode];
       $('docOptions').classList.toggle('hidden', mode !== 'doc');
+      $('tableOptions').classList.toggle('hidden', mode !== 'table');
       $('pageRangeWrap').classList.toggle('hidden', mode !== 'cad');
       $('fileInput').accept = cfg.accept;
       $('sourceCardHint').textContent = cfg.cardHint;
@@ -1101,6 +1110,7 @@
           resp = await fetch('/api/translate/cad', { method: 'POST', body: formData });
         } else if (currentMode === 'table') {
           formData.append('target_lang', $('langSelect').value);
+          formData.append('translate_images', $('imageTranslateToggle').checked);
           resp = await fetch('/api/translate/table', { method: 'POST', body: formData });
         } else {
           formData.append('mode', document.querySelector('input[name="docMode"]:checked').value);
@@ -1200,8 +1210,9 @@
       const isTable = r.kind === 'table' || !!r.output_xlsx;
       const outName = r.output_pdf || r.output_xlsx;
       if (isTable) {
+        const imgPart = r.images_translated != null ? ` · 图片内文字 ${r.images_translated} 张` : '';
         setStatus('bg-emerald-500', '翻译完成',
-          `共 ${r.sheets ?? '-'} 个工作表 · 翻译 ${r.total_cells ?? '-'} 个单元格 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
+          `共 ${r.sheets ?? '-'} 个工作表 · 翻译 ${r.total_cells ?? '-'} 个单元格${imgPart} · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);
       } else {
         setStatus('bg-emerald-500', '翻译完成',
           `共 ${r.total_pages ?? '-'} 页 · 替换 ${r.total_replaced ?? '-'} 处 · 消耗 ￥${(r.total_cost ?? 0).toFixed(4)}`, false);

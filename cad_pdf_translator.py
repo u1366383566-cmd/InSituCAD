@@ -15,15 +15,18 @@ CAD图纸专业翻译器 (基于 RapidOCR + DeepSeek 原位重构引擎)
 import sys
 import os
 import re
+import io
 import json
 import time
 import base64
+import hashlib
 import threading
 import openpyxl
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import requests
+from PIL import Image, ImageDraw, ImageFont
 from rapidocr_onnxruntime import RapidOCR
 
 # ==================== 默认配置区 ====================
@@ -1174,10 +1177,299 @@ def excel_com_finalize(xlsx_path, preview_png_path):
             pass
 
 
-def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=None, provider=None):
+def _group_text_blocks(lines, min_gap=0.7):
+    """OCR 行按垂直邻近合并成文字块：下一行 y0 与上一行 y1 的间距小于行高×min_gap
+    且水平位置接近时视为同块（如材质卡的标题行+括号行+描述行）。lines: [x0,y0,x1,y1,text,uid]"""
+    blocks = []
+    for l in sorted(lines, key=lambda v: v[1]):
+        x0, y0, x1, y1 = l[:4]
+        h = y1 - y0
+        if blocks:
+            b = blocks[-1]
+            if y0 - b['y1'] < min_gap * max(h, b['h']) and x0 < b['x1'] + 30:
+                b['x0'] = min(b['x0'], x0)
+                b['x1'] = max(b['x1'], x1)
+                b['y1'] = y1
+                b['h'] = b['y1'] - b['y0']
+                b['lines'].append(l)
+                continue
+        blocks.append(dict(x0=x0, y0=y0, x1=x1, y1=y1, h=h, lines=[l]))
+    return blocks
+
+
+def _wrap_rows(text, box_w, box_h, max_lines=3, min_size=7):
+    """块内折行排版：在宽 box_w 高 box_h（px）内穷举 1~max_lines 行方案，
+    取可渲染字号最大的一种。返回 (rows, size)。"""
+    def balanced(n):
+        # 按总宽/n 的目标行宽贪心装词
+        words = text.split(' ')
+        target = text_width_em(text) / n
+        rows, cur, cw = [], '', 0.0
+        for w in words:
+            ww = text_width_em(w) + (0.30 if cur else 0)
+            if cur and cw + ww > target and len(rows) < n - 1:
+                rows.append(cur)
+                cur, cw = w, text_width_em(w)
+            else:
+                cur = (cur + ' ' + w) if cur else w
+                cw += ww
+        if cur:
+            rows.append(cur)
+        return rows
+
+    best = None
+    for n in range(1, max_lines + 1):
+        rows = balanced(n)
+        widest = max(text_width_em(r) for r in rows)
+        size = min(box_h * 0.88 / (len(rows) * 1.18), box_w / widest * 1.02)
+        if best is None or size > best[1]:
+            best = (rows, size)
+    rows, size = best
+    return rows, max(int(size), min_size)
+
+
+def _image_bytes(im):
+    """读取 openpyxl 图片对象的字节，并把 im.ref 重置为全新的 BytesIO。
+    不能调用 openpyxl 自带的 _data()：它会 close 掉 ref 内的 BytesIO，
+    导致后续保存报 'I/O operation on closed file'。"""
+    ref = im.ref
+    if isinstance(ref, bytes):
+        data = ref
+    elif isinstance(ref, str):
+        with open(ref, 'rb') as f:
+            data = f.read()
+    else:  # BytesIO 或其他带 read 的文件对象
+        ref.seek(0)
+        data = ref.read()
+    im.ref = io.BytesIO(data)
+    return data
+
+
+def translate_images_in_workbook(wb, provider, lang_name, target_lang, progress_callback=None):
+    """翻译工作簿内嵌图片中的中文文字：OCR 检出 → 批量翻译（词库强制优先）→
+    整块擦除 + 按原行位置分段回填英文。返回 (stats, usage, lang_votes)。
+    stats: {images_total, images_unique, images_translated, blocks_done, blocks_skipped}
+    安全护栏（任何一项不满足整块保留中文，绝不出现"擦了没填"）：
+    - 无中文的图片原样保留（照片零改动）
+    - 文字块底色边缘像素方差过大（文字压在照片/纹理上）跳过
+    - 块内任一行翻译缺失（模型批次失败）跳过
+    - 图片像素尺寸不变，显示锚点由 openpyxl 原样保留"""
+    import io as _io
+    stats = dict(images_total=0, images_unique=0, images_translated=0,
+                 blocks_done=0, blocks_skipped=0)
+    usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+    lang_votes = []
+
+    def progress(frac, msg):
+        if progress_callback:
+            progress_callback(min(0.999, frac), msg)
+
+    # 1) 收集：按内容哈希去重（同一张图被多个 sheet/锚点引用时只 OCR 与回填一次）
+    uniq = {}
+    for ws in wb.worksheets:
+        for im in getattr(ws, '_images', []):
+            try:
+                data = _image_bytes(im)
+            except Exception:
+                continue
+            h = hashlib.md5(data).hexdigest()
+            uniq.setdefault(h, {'data': data, 'refs': []})['refs'].append(im)
+    stats['images_total'] = sum(len(v['refs']) for v in uniq.values())
+    stats['images_unique'] = len(uniq)
+    if not uniq:
+        return stats, usage, lang_votes
+
+    ocr_engine = RapidOCR()
+    for h, item in uniq.items():
+        item['img'] = np.array(Image.open(_io.BytesIO(item['data'])).convert('RGB'))
+        result, _ = ocr_engine(item['img'])
+        lines = []
+        for box, text, score in (result or []):
+            t = str(text).strip()
+            # 仅翻含中文的行：本功能面向中文源表格，纯字母/数字标注（型号、代号）保持原样
+            if float(score) < 0.5 or not re.search(r'[\u4e00-\u9fff]', t) or not is_translatable_cell(t):
+                continue
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            lines.append([min(xs), min(ys), max(xs), max(ys), t, None])
+        item['blocks'] = _group_text_blocks(lines) if lines else []
+    progress(0.70, "图片文字检出完成，正在批量翻译")
+
+    # 2) 全部图片的可译行汇总为一次批量翻译（共享 20条/批 重试与 token 统计）
+    text_map = {}
+    uid = 0
+    for item in uniq.values():
+        for b in item['blocks']:
+            for l in b['lines']:
+                l[5] = uid
+                text_map[uid] = l[4]
+                uid += 1
+    if not text_map:
+        print("  - 图片内未检出中文文字，全部图片原样保留")
+        return stats, usage, lang_votes
+    print(f"  - 图片内检出 {len(text_map)} 条中文文字（{stats['images_unique']} 张图中）")
+
+    translations = {}
+    batch_progress = None
+
+    def on_batch(done, total):
+        progress(0.70 + 0.08 * done / total, f"图片文字翻译 {done}/{total} 批")
+
+    batch_progress = on_batch
+    items, img_usage = translate_text_blocks(text_map, provider, lang_name, batch_progress=batch_progress)
+    usage['prompt_tokens'] += img_usage.get('prompt_tokens', 0)
+    usage['completion_tokens'] += img_usage.get('completion_tokens', 0)
+    for it in items:
+        try:
+            iid = int(it.get('id', -1))
+        except Exception:
+            continue
+        if iid not in text_map:
+            continue
+        original = str(it.get('original', '')).strip()
+        trans = str(it.get('translation', '')).strip()
+        if original:
+            translations[iid] = trans
+            lang = normalize_lang_code(it.get('lang'))
+            if lang:
+                lang_votes.append(lang)
+
+    # 词库强制优先（与单元格同规则，方向键共享）
+    cache = load_cache()
+    hit_counts = {}
+    new_entries = {}
+    for u, original in text_map.items():
+        dst = (translations.get(u) or '').strip()
+        ck = make_term_key(original, target_lang)
+        if ck in cache:
+            cached_v = str(term_zh(cache, ck, '')).strip()
+            if cached_v and cached_v != original:
+                dst = cached_v
+        translations[u] = dst or None
+        if dst and dst != original:
+            hit_counts[ck] = hit_counts.get(ck, 0) + 1
+            if ck not in cache:
+                new_entries[ck] = {'zh': dst, 'category': '', 'count': 0,
+                                   'updated_at': time.strftime('%Y-%m-%d %H:%M')}
+    try:
+        if new_entries:
+            save_cache(new_entries)
+        bump_cache_counts(hit_counts)
+    except Exception as e:
+        print(f"  [图片词库缓存异常] {e}")
+
+    # 3) 逐块擦除回填：先统一擦除（numpy），再一次绘制（PIL）
+    font_cache = {}
+    font_file = get_font_for_lang(target_lang)
+
+    def get_font(size):
+        if size not in font_cache:
+            font_cache[size] = ImageFont.truetype(font_file, size)
+        return font_cache[size]
+
+    W_pad = 3
+    for item in uniq.values():
+        blocks = item['blocks']
+        if not blocks:
+            continue
+        img = item['img']
+        H, W = img.shape[:2]
+        erased = []
+        for b in blocks:
+            uids = [l[5] for l in b['lines']]
+            if any(translations.get(u) is None for u in uids):
+                stats['blocks_skipped'] += 1
+                continue
+            x0, y0, x1, y1 = b['x0'], b['y0'], b['x1'], b['y1']
+            xa0, xa1 = max(0, int(x0) - W_pad), min(W, int(x1) + W_pad)
+            ya0, ya1 = max(0, int(y0) - W_pad), min(H, int(y1) + W_pad)
+            border = np.concatenate([
+                img[ya0:ya1, max(0, int(x0) - W_pad):int(x0)].reshape(-1, 3),
+                img[ya0:ya1, int(x1):xa1].reshape(-1, 3)])
+            patch = img[max(0, int(y0)):int(y1), max(0, int(x0)):int(x1)].reshape(-1, 3)
+            # 底色：优先取块外扩边缘像素中位数；边缘方差大（文字压在照片/纹理上）时
+            # 退回块内主导色（按 16 级量化取众数）——文字像素占少数，主导色就是
+            # 文字所坐的贴片色（如深色图里的白色标注贴片）。此时填充框收缩到
+            # 主导色像素的实际包围盒，避免把贴片以外的图形涂成贴片色
+            bg = None
+            fill_rect = (max(0, int(x0) - 1), max(0, int(y0) - 1),
+                         min(W - 1, int(x1) + 1), min(H - 1, int(y1) + 1))
+            if len(border) >= 10 and border.std(axis=0).mean() <= 30:
+                bg = tuple(int(v) for v in np.median(border, axis=0))
+            else:
+                quant = (patch // 16).reshape(-1, 3)
+                if len(quant) == 0:
+                    stats['blocks_skipped'] += 1
+                    continue
+                qcolors, qcounts = np.unique(quant, axis=0, return_counts=True)
+                top = qcolors[np.argmax(qcounts)]
+                cover = qcounts.max() / len(quant)
+                if cover < 0.5:
+                    stats['blocks_skipped'] += 1
+                    continue
+                mask = np.all(quant == top, axis=1).reshape(
+                    min(H, int(y1)) - max(0, int(y0)),
+                    min(W, int(x1)) - max(0, int(x0)))
+                ys, xs = np.where(mask)
+                if len(ys) == 0:
+                    stats['blocks_skipped'] += 1
+                    continue
+                by0, by1 = np.percentile(ys, [0.5, 99.5])
+                bx0, bx1 = np.percentile(xs, [0.5, 99.5])
+                fill_rect = (max(0, int(x0) + int(bx0) - 1), max(0, int(y0) + int(by0) - 1),
+                             min(W - 1, int(x0) + int(bx1) + 1), min(H - 1, int(y1) + int(by1) + 1))
+                bg = tuple(int(v) for v in patch[mask.reshape(-1)].mean(axis=0))
+            lum = patch.mean(axis=1)
+            dark = patch[lum < np.percentile(lum, 15)]
+            fg = tuple(int(v) for v in np.median(dark, axis=0)) if len(dark) else (60, 60, 60)
+            cv2.rectangle(img, (fill_rect[0], fill_rect[1]), (fill_rect[2], fill_rect[3]), bg, -1)
+            erased.append((b, fg, fill_rect))
+
+        if not erased:
+            continue
+        pil = Image.fromarray(img)
+        draw = ImageDraw.Draw(pil)
+        for b, fg, _fill_rect in erased:
+            # 每条原文行占 [本行y0, 下一行y0) 的横带，译文在带内折行居中，
+            # 保留原"标题行/括号行/描述行"的版式节奏；矮块（总高不足最高行 2.2 倍，
+            # 如竖排标签被 OCR 拆成的两个短行）合并为单一横带整体折行，避免溢出边界
+            ls = sorted(b['lines'], key=lambda v: v[1])
+            block_h = b['y1'] - b['y0']
+            max_line_h = max(l[3] - l[1] for l in ls)
+            if block_h < 2.2 * max_line_h:
+                bands = [(None, b['y0'], b['y1'],
+                          ' '.join(translations[l[5]] for l in ls))]
+            else:
+                bands = [(l, l[1], ls[i + 1][1] if i + 1 < len(ls) else b['y1'],
+                          translations[l[5]])
+                         for i, l in enumerate(ls)]
+            for _, top, bottom, dst in bands:
+                rows, size = _wrap_rows(dst, b['x1'] - b['x0'],
+                                        max(bottom - top, 8))
+                f = get_font(size)
+                line_h = size * 1.18
+                ty = top + ((bottom - top) - line_h * len(rows)) / 2 - size * 0.18
+                for r in rows:
+                    draw.text((b['x0'], ty), r, font=f, fill=fg)
+                    ty += line_h
+            stats['blocks_done'] += 1
+        img = np.array(pil)
+        buf = _io.BytesIO()
+        Image.fromarray(img).save(buf, format='PNG')
+        # 像素尺寸不变（防拉伸变形），仅换图源；每个引用给独立 BytesIO 供 openpyxl 各自读取
+        for im in item['refs']:
+            im.ref = _io.BytesIO(buf.getvalue())
+        stats['images_translated'] += 1
+    print(f"  - 图片文字回填 {stats['blocks_done']} 块（跳过 {stats['blocks_skipped']} 块），"
+          f"涉及 {stats['images_translated']}/{stats['images_unique']} 张图")
+    return stats, usage, lang_votes
+
+
+def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=None, provider=None, translate_images=True):
     """
     Excel 表格翻译主入口：收集可译单元格 -> 批量纯文本翻译（企业词库强制优先）
-    -> 原位回写 .value -> 保存 -> Excel COM 重算公式缓存值并导出预览图。
+    -> 原位回写 .value -> [translate_images] 内嵌图片中文翻译（整块擦除回填）
+    -> 保存 -> Excel COM 重算公式缓存值并导出预览图。
     版面元素（图片/合并/样式/行高列宽/公式）不做任何改动。
     provider 为任务开始时锁定的引擎快照，与 PDF 管线共用。
     """
@@ -1294,6 +1586,20 @@ def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=No
         except Exception as e:
             print(f"  [缓存保存异常] {e}")
 
+    # --- 3.5) 内嵌图片中文翻译（可选）：OCR 检出 -> 批量翻译 -> 整块擦除回填 ---
+    img_stats = None
+    if translate_images:
+        progress(0.66, "扫描图片内嵌文字...")
+        try:
+            img_stats, img_usage, img_votes = translate_images_in_workbook(
+                wb, provider, lang_name, target_lang, progress_callback=progress_callback)
+            usage['prompt_tokens'] += img_usage.get('prompt_tokens', 0)
+            usage['completion_tokens'] += img_usage.get('completion_tokens', 0)
+            lang_votes.extend(img_votes)
+        except Exception as e:
+            print(f"  [图片翻译异常，已跳过] {e}")
+            img_stats = None
+
     # --- 4) 保存（版面元素由 openpyxl 回环原样保留） ---
     out_dir_path = os.path.dirname(output_path)
     if out_dir_path:
@@ -1341,7 +1647,10 @@ def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=No
         f"· 翻译引擎:       {engine_name} ({provider.get('vision_model')})\n"
         f"· 工作表:         {sheet_count} 个\n"
         f"· 成功翻译单元格: {written} 个（共 {total_units} 条文字）\n"
-        f"· 消耗 Token:     输入 {usage['prompt_tokens']} / 输出 {usage['completion_tokens']}\n"
+        + (f"· 图片内文字:     翻译 {img_stats['blocks_done']} 块 / "
+           f"{img_stats['images_translated']} 张图（跳过 {img_stats['blocks_skipped']} 块）\n"
+           if img_stats else "")
+        + f"· 消耗 Token:     输入 {usage['prompt_tokens']} / 输出 {usage['completion_tokens']}\n"
         f"· 实际消耗费用:   {('约 ￥%.4f 元' % total_cost) if total_cost is not None else '未配置单价，仅计 Token'}\n"
     )
     if final_balance is not None:
@@ -1361,6 +1670,9 @@ def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=No
         "total_cells": written,
         "total_units": total_units,
         "sheets": sheet_count,
+        "images_translated": img_stats['images_translated'] if img_stats else 0,
+        "images_unique": img_stats['images_unique'] if img_stats else 0,
+        "blocks_skipped": img_stats['blocks_skipped'] if img_stats else 0,
         "total_cost": total_cost if total_cost is not None else 0.0,
         "final_balance": final_balance,
         "engine": engine_name,

@@ -592,7 +592,8 @@ async def get_task_status(task_id: str):
     return TASKS[task_id]
 
 # ==================== Excel 表格任务 ====================
-def run_table_task_worker(task_id: str, input_path: str, output_path: str, target_lang: str, provider: Dict[str, Any]):
+def run_table_task_worker(task_id: str, input_path: str, output_path: str, target_lang: str,
+                          provider: Dict[str, Any], translate_images: bool = True):
     """provider 为任务创建时锁定的引擎快照，中途切换引擎不影响本任务"""
     def on_progress(frac: float, msg: str):
         if task_id in TASKS:
@@ -607,7 +608,8 @@ def run_table_task_worker(task_id: str, input_path: str, output_path: str, targe
             output_path=output_path,
             target_lang=target_lang,
             progress_callback=on_progress,
-            provider=provider
+            provider=provider,
+            translate_images=translate_images
         )
         if res.get("success"):
             out_name = os.path.basename(res["output_xlsx"])
@@ -623,6 +625,7 @@ def run_table_task_worker(task_id: str, input_path: str, output_path: str, targe
                 "summary": res.get("summary", ""),
                 "sheets": res.get("sheets", 0),
                 "total_cells": res.get("total_cells", 0),
+                "images_translated": res.get("images_translated", 0),
                 "total_cost": res.get("total_cost", 0.0),
                 "final_balance": res.get("final_balance")
             }
@@ -653,7 +656,8 @@ def run_table_task_worker(task_id: str, input_path: str, output_path: str, targe
 @app.post("/api/translate/table")
 async def start_table_translation(
     file: UploadFile = File(...),
-    target_lang: Optional[str] = Form("zh")
+    target_lang: Optional[str] = Form("zh"),
+    translate_images: Optional[bool] = Form(True)
 ):
     task_id = str(uuid.uuid4())[:8]
     clean_name = sanitize_upload_name(file.filename)
@@ -728,7 +732,7 @@ async def start_table_translation(
 
     t = threading.Thread(
         target=run_table_task_worker,
-        args=(task_id, save_path, out_xlsx, target_lang, provider)
+        args=(task_id, save_path, out_xlsx, target_lang, provider, bool(translate_images))
     )
     t.daemon = True
     t.start()
