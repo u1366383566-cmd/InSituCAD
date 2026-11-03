@@ -750,6 +750,85 @@ def parse_page_range(range_str, max_pages):
         return None
     return sorted(pages)
 
+def _ring_median_color(buf, rect, zoom):
+    """在 rect 外扩约 3pt 的四条边带内取逐通道中位色，返回 0-1 RGB 元组。
+    边带在框外，不含原文字像素；细表格线占少数，被中位数自然过滤。"""
+    h, w = buf.shape[:2]
+    pad = max(int(round(3 * zoom)), 2)
+    x0 = max(int(rect.x0 * zoom) - pad, 0); y0 = max(int(rect.y0 * zoom) - pad, 0)
+    x1 = min(int(rect.x1 * zoom) + pad + 1, w); y1 = min(int(rect.y1 * zoom) + pad + 1, h)
+    ix0 = max(int(rect.x0 * zoom), 0); iy0 = max(int(rect.y0 * zoom), 0)
+    ix1 = min(int(rect.x1 * zoom) + 1, w); iy1 = min(int(rect.y1 * zoom) + 1, h)
+    if x1 <= x0 + 1 or y1 <= y0 + 1:
+        return (1.0, 1.0, 1.0)
+    bands = []
+    if iy0 > y0: bands.append(buf[y0:iy0, x0:x1])     # 上
+    if y1 > iy1: bands.append(buf[iy1:y1, x0:x1])     # 下
+    if ix0 > x0: bands.append(buf[iy0:iy1, x0:ix0])   # 左
+    if x1 > ix1: bands.append(buf[iy0:iy1, ix1:x1])   # 右
+    if not bands:
+        return (1.0, 1.0, 1.0)
+    med = np.median(np.concatenate([b.reshape(-1, 3) for b in bands], axis=0), axis=0) / 255.0
+    return (float(med[0]), float(med[1]), float(med[2]))
+
+
+def probe_box_backgrounds(page, rects, zoom=2.0):
+    """探测每个文字框底下的真实背景色，返回与 rects 等长的 0-1 RGB 元组列表。
+    一级：页面矢量填充图元中找「罩住该框的最小填充矩形」直接取其填充色
+          （表格底纹/灰色表头/标注贴片都是矢量矩形，取色即像素级匹配）；
+    二级：矢量未命中时渲染去旋转位图，在框四周环带取中位色（适用图片底）；
+    两级都失败才回退白色。渲染矩阵带 derotation_matrix，旋转页坐标同样对齐。"""
+    WHITE = (1.0, 1.0, 1.0)
+    results = [WHITE] * len(rects)
+    if not rects:
+        return results
+
+    # 一级：收集所有矢量填充子矩形（按面积升序、后画者优先，确保命中「最贴身」的底色）
+    vec = []
+    try:
+        for order, d in enumerate(page.get_drawings()):
+            fill = d.get("fill")
+            if not fill or len(fill) < 3:
+                continue
+            color = (float(fill[0]), float(fill[1]), float(fill[2]))
+            for it in d.get("items", []):
+                if it[0] == "re":
+                    r = it[1]
+                    if r.is_valid and not r.is_empty:
+                        vec.append((r.get_area(), -order, color, r))
+    except Exception:
+        vec = []
+    vec.sort(key=lambda t: (t[0], t[1]))
+
+    pix = None   # 懒渲染：仅在确有框需要像素兜底时才渲染一次
+    for i, r in enumerate(rects):
+        hit = None
+        for _, _, color, vr in vec:
+            if vr.contains(r):
+                hit = color
+                break
+        if hit is None and vec:
+            center = fitz.Point((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
+            for _, _, color, vr in vec:
+                if vr.contains(center):
+                    hit = color
+                    break
+        if hit is not None:
+            results[i] = hit
+            continue
+
+        # 二级：位图环带中位色
+        if pix is None:
+            try:
+                pm = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom) * page.derotation_matrix, alpha=False)
+                pix = np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.height, pm.width, pm.n)[:, :, :3]
+            except Exception:
+                pix = False
+        if pix is not False:
+            results[i] = _ring_median_color(pix, r, zoom)
+    return results
+
+
 def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", progress_callback=None, provider=None, ocr_api_url=None):
     """
     处理 CAD 图纸翻译主入口（视觉读图管线）。
@@ -953,9 +1032,12 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
         # --- 4) 原位擦除回填（方向 = 页面原始旋转角，显示水平正读） ---
         ins_count = 0
         if jobs:
+            # 先探测每个文字框的真实底色（矢量填充色优先，位图环带采样兜底），
+            # 按探测色擦除而非写死白底——灰色表头/彩色底纹上不再留下白色补丁
+            bg_colors = probe_box_backgrounds(page, [j[0] for j in jobs])
             page.insert_font(fontname="cjk", fontfile=font_file)
-            for rect, dst, ck, rot in jobs:
-                page.add_redact_annot(rect + (-0.5, -0.5, 0.5, 0.5), fill=(1, 1, 1))
+            for (rect, dst, ck, rot), bg in zip(jobs, bg_colors):
+                page.add_redact_annot(rect + (-0.5, -0.5, 0.5, 0.5), fill=bg)
             try:
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
             except Exception:
