@@ -30,7 +30,7 @@ pip install fastapi uvicorn pymupdf numpy opencv-python requests rapidocr_onnxru
 # Optional: BabelDoc engine for the brochure/manual mode
 pip install babeldoc
 # Optional: Excel/Word modes (openpyxl + python-docx required; pywin32 enables COM preview/recalc when Office is installed)
-pip install openpyxl python-docx pywin32
+pip install openpyxl python-docx pywin32 olefile
 
 python server.py
 ```

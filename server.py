@@ -662,10 +662,9 @@ async def start_table_translation(
     task_id = str(uuid.uuid4())[:8]
     clean_name = sanitize_upload_name(file.filename)
     lower = clean_name.lower()
-    if lower.endswith(".xls"):
-        raise HTTPException(status_code=400, detail="不支持老版 .xls 格式，请先用 Excel 另存为 .xlsx 后上传")
-    if not lower.endswith((".xlsx", ".xlsm")):
-        raise HTTPException(status_code=400, detail="请上传 Excel 表格文件（.xlsx / .xlsm）")
+    if not lower.endswith((".xlsx", ".xlsm", ".xls")):
+        raise HTTPException(status_code=400, detail="请上传 Excel 表格文件（.xlsx / .xlsm / .xls）")
+    # 老 .xls（含只改扩展名的）由 process_xlsx 按文件魔数识别后用本机 Excel 自动转 .xlsx
     # 语言代码不在支持列表时按中文处理，与 CAD 端点一致
     target_lang = target_lang if target_lang in cad_pdf_translator.LANG_NAMES else "zh"
 

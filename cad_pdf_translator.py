@@ -15,6 +15,7 @@ CAD图纸专业翻译器 (基于 RapidOCR + DeepSeek 原位重构引擎)
 
 import sys
 import os
+import shutil
 import re
 import io
 import json
@@ -23,6 +24,7 @@ import base64
 import hashlib
 import threading
 import openpyxl
+from wps_cell_images import restore_wps_cell_images
 import docx
 import fitz  # PyMuPDF
 import cv2
@@ -329,6 +331,21 @@ def extract_text_lines(page, min_chars=60):
                           'px': (x0 / SCALE, y0 / SCALE, x1 / SCALE, y1 / SCALE),
                           'text': txt,
                           'line_h': y1 - y0, 'n_lines': 1})
+    # PDF generators may wrap the last Han character onto a separate line.
+    # Join it to the closest aligned preceding line so the model sees the word.
+    for unit in list(units):
+        if not re.fullmatch(r'[\u4e00-\u9fff]', unit['text']):
+            continue
+        rect = unit['rect']
+        candidates = [other for other in units if other is not unit
+                      and re.search(r'[\u4e00-\u9fff]$', other['text'])
+                      and 0 <= rect.y0 - other['rect'].y1 <= rect.height * 0.6
+                      and other['rect'].x0 <= (rect.x0 + rect.x1) / 2 <= other['rect'].x1]
+        if candidates:
+            previous = min(candidates, key=lambda other: rect.y0 - other['rect'].y1)
+            previous['text'] += unit['text']
+            previous['rect'] |= rect
+            units.remove(unit)
     if alnum < min_chars:
         return [], alnum
     return units, alnum
@@ -641,7 +658,7 @@ def bump_cache_counts(hit_counts):
 
 def is_translatable(text):
     t = text.strip()
-    if len(t) < 2:
+    if len(t) < 2 and not re.fullmatch(r'[\u4e00-\u9fff]', t):
         return False
     if not any(c.isalpha() for c in t):
         return False
@@ -695,23 +712,127 @@ def split_two_lines(text):
     return t[:best].rstrip(), t[best:].lstrip()
 
 
-def layout_backfill(dst, run_len, glyph_len, allow_wrap):
-    """回填排版：反推字号并按需折行，返回 (lines, size)。
-    run_len / glyph_len：文字行进方向 / 字高方向的可用框长度（pt）。
-    - 字号 = min(框高×0.85, 框宽×1.05 ÷ 文本宽度em)
-    - 保底下限 max(框高×0.5, 3.0)：译文再长也不缩到原字高一半以下，宁可持续外溢出
-    - 单行被宽度压到保底下限以下时，折 2 行（行距 1.25×字号）字号更大才采用"""
-    fit = min(glyph_len * 0.85, (run_len * 1.05) / text_width_em(dst))
-    floor = max(glyph_len * 0.5, 3.0)
-    if fit >= floor or not allow_wrap:
-        return [dst], max(fit, floor)
-    pair = split_two_lines(dst)
-    if pair:
-        fit2 = min(glyph_len * 0.85 / 2.5,
-                   (run_len * 1.05) / max(text_width_em(pair[0]), text_width_em(pair[1])))
-        if fit2 > fit and fit2 >= 3.0:
-            return list(pair), fit2
-    return [dst], floor
+def layout_backfill(dst, run_len, glyph_len, allow_wrap, fontfile=None):
+    """回填排版：以「原字号优先、绝不横向超框、绝不词中断行」为原则反推字号与折行。
+    run_len = 排版宽度约束（所属单元格宽，由调用方从 probe 的 bounds 取，
+    比 OCR 文字紧贴框宽得多——按紧贴框排布曾把 Model 硬折成 Mod el）；
+    glyph_len = 原文字框高 ≈ 原字号，决定字号与纵向位置（锚定原排版）。
+    搜索顺序：原字号单行 → 逐级缩小单行 → 词界折行（整词优先）→
+    下限处仍放不下才字符硬切兜底。"""
+    dst = dst.strip() or dst
+    hard_w = run_len * 0.96                      # 行宽硬约束，留 4% 防贴边框线
+    natural = glyph_len * 0.88                   # 原字号近似（CJK 框高≈原字号）
+    floor = max(glyph_len * 0.30, 2.6)           # 下探下限
+    fallback = None
+    size = natural
+    while True:
+        if _text_w(dst, size, fontfile) <= hard_w:
+            return [dst], size
+        if allow_wrap:
+            lines = _wrap_words(dst, hard_w, size, fontfile)   # 纯词界，不切词
+            if all(_text_w(ln, size, fontfile) <= hard_w for ln in lines):
+                total_h = (len(lines) - 1) * size * _LINE_GAP + size
+                if total_h <= glyph_len * 1.45:
+                    return lines, size
+                if fallback is None:
+                    fallback = (lines, size)
+        if size <= floor:
+            break
+        size = max(floor, size * 0.93)
+    if fallback:
+        return fallback
+    # 到下限仍放不下：可折行时按字符硬切保宽（极端长词）；不可折行按旧 em 语义外溢
+    if allow_wrap:
+        return _wrap_measured(dst, hard_w, floor, fontfile), floor
+    fit = min(natural, (run_len * 1.05) / max(text_width_em(dst), 0.52))
+    return [dst], max(fit, max(glyph_len * 0.5, 3.0))
+
+
+def _wrap_words(text, max_w, size, fontfile=None):
+    """纯词界贪心折行，绝不切断单词；单词单独超宽时独立成行，
+    由调用方校验行宽——校验不过就继续缩小字号再试。"""
+    lines, cur = [], ""
+    for w in text.split():
+        cand = w if not cur else cur + " " + w
+        if not cur or _text_w(cand, size, fontfile) <= max_w:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [text]
+
+
+def _wrap_measured(text, max_w, size, fontfile=None):
+    """字符硬切兜底折行：优先在空格处断，无空格（中日文）或超宽单词按字符切。
+    切段之间的连接符跟随原文（有空格的拼音文字接空格，中日文紧排）。"""
+    toks = []
+    for word in text.split():
+        if _text_w(word, size, fontfile) <= max_w or len(word) == 1:
+            toks.append((word, " "))
+        else:
+            segs, cur = [], ""
+            for ch in word:
+                if cur and _text_w(cur + ch, size, fontfile) > max_w:
+                    segs.append(cur)
+                    cur = ch
+                else:
+                    cur += ch
+            if cur:
+                segs.append(cur)
+            toks.append((segs[0], " "))
+            for seg in segs[1:]:
+                toks.append((seg, ""))
+    if not toks:
+        toks = [(text, "")]
+    lines, cur = [], ""
+    for t, sep in toks:
+        cand = t.lstrip() if not cur else cur + sep + t
+        if not cur or _text_w(cand, size, fontfile) <= max_w:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = t
+    if cur:
+        lines.append(cur)
+    return lines or [text]
+
+
+_LINE_GAP = 1.22      # 折行行距（×字号）
+_FONT_CACHE = {}
+
+def _fit_font(fontfile=None):
+    """按字体文件缓存 fitz.Font 对象（None=内置 Helvetica），用于精确测宽"""
+    key = fontfile or "__helv__"
+    f = _FONT_CACHE.get(key)
+    if f is None:
+        try:
+            f = fitz.Font(fontfile=fontfile) if fontfile else fitz.Font("helv")
+        except Exception:
+            f = False
+        _FONT_CACHE[key] = f
+    return f or None
+
+def _text_w(text, size, fontfile=None):
+    """文本在指定字号下的精确宽度(pt)；字体对象不可用时退回 em 估算"""
+    f = _fit_font(fontfile)
+    if f is not None:
+        try:
+            return f.text_length(text, fontsize=size)
+        except Exception:
+            pass
+    return text_width_em(text) * size
+
+def _is_latin_text(text):
+    """纯拉丁文本（ASCII/Latin-1 + 常见破折号弯引号省略号），可走内置
+    Helvetica 渲染出原生西文观感；其余（CJK/西里尔/泰/阿拉伯等）仍用 CJK 字体"""
+    for ch in text:
+        o = ord(ch)
+        if o <= 0xFF or 0x2010 <= o <= 0x2027:
+            continue
+        return False
+    return True
 
 def parse_page_range(range_str, max_pages):
     """解析页码字符串，如 '18, 22-25, 81' -> [18, 22, 23, 24, 25, 81]
@@ -773,15 +894,20 @@ def _ring_median_color(buf, rect, zoom):
 
 
 def probe_box_backgrounds(page, rects, zoom=2.0):
-    """探测每个文字框底下的真实背景色，返回与 rects 等长的 0-1 RGB 元组列表。
+    """探测每个文字框底下的真实背景色，返回 (colors, bounds)：
+    colors 与 rects 等长的 0-1 RGB 元组列表（擦除填充色）；
+    bounds 为每框命中的「最贴身矢量矩形」——通常就是所属单元格，用作排版
+    宽度约束（OCR 文字紧贴框常远窄于单元格，按它排布会把 Model 硬折成 Mod el），
+    矢量未命中（图片底）时为 None。
     一级：页面矢量填充图元中找「罩住该框的最小填充矩形」直接取其填充色
           （表格底纹/灰色表头/标注贴片都是矢量矩形，取色即像素级匹配）；
     二级：矢量未命中时渲染去旋转位图，在框四周环带取中位色（适用图片底）；
     两级都失败才回退白色。渲染矩阵带 derotation_matrix，旋转页坐标同样对齐。"""
     WHITE = (1.0, 1.0, 1.0)
-    results = [WHITE] * len(rects)
+    colors = [WHITE] * len(rects)
+    bounds = [None] * len(rects)
     if not rects:
-        return results
+        return colors, bounds
 
     # 一级：收集所有矢量填充子矩形（按面积升序、后画者优先，确保命中「最贴身」的底色）
     vec = []
@@ -802,19 +928,19 @@ def probe_box_backgrounds(page, rects, zoom=2.0):
 
     pix = None   # 懒渲染：仅在确有框需要像素兜底时才渲染一次
     for i, r in enumerate(rects):
-        hit = None
+        hit_c, hit_r = None, None
         for _, _, color, vr in vec:
             if vr.contains(r):
-                hit = color
+                hit_c, hit_r = color, vr
                 break
-        if hit is None and vec:
+        if hit_c is None and vec:
             center = fitz.Point((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
             for _, _, color, vr in vec:
                 if vr.contains(center):
-                    hit = color
+                    hit_c, hit_r = color, vr
                     break
-        if hit is not None:
-            results[i] = hit
+        if hit_c is not None:
+            colors[i], bounds[i] = hit_c, hit_r
             continue
 
         # 二级：位图环带中位色
@@ -825,8 +951,42 @@ def probe_box_backgrounds(page, rects, zoom=2.0):
             except Exception:
                 pix = False
         if pix is not False:
-            results[i] = _ring_median_color(pix, r, zoom)
-    return results
+            colors[i] = _ring_median_color(pix, r, zoom)
+    return colors, bounds
+
+
+def visible_cell_bounds(page, colors, bounds, zoom=2.0):
+    """Constrain filled cells to their visible pixels, including PDF clipping at page breaks."""
+    if not any(b is not None and min(c) < 0.95 for c, b in zip(colors, bounds)):
+        return bounds
+    pm = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom) * page.derotation_matrix, alpha=False)
+    pixels = np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.height, pm.width, pm.n)[:, :, :3]
+    result = []
+    for color, bound in zip(colors, bounds):
+        if bound is None or min(color) >= 0.95:
+            result.append(bound)
+            continue
+        x0 = max(0, int((bound.x0 + 1) * zoom))
+        x1 = min(pm.width, int((bound.x1 - 1) * zoom))
+        y0 = max(0, int(bound.y0 * zoom))
+        y1 = min(pm.height, int(np.ceil(bound.y1 * zoom)))
+        if x1 <= x0 or y1 <= y0:
+            result.append(bound)
+            continue
+        sample = pixels[y0:y1, x0:x1].astype(np.int16)
+        target = np.array(color) * 255
+        matches = np.all(np.abs(sample - target) <= 12, axis=2).mean(axis=1) >= 0.4
+        indices = np.flatnonzero(matches)
+        if len(indices) < 4:
+            result.append(bound)
+            continue
+        # Keep the longest continuous band; isolated matching pixels may be elsewhere.
+        groups = np.split(indices, np.where(np.diff(indices) > 1)[0] + 1)
+        band = max(groups, key=len)
+        visible = fitz.Rect(bound.x0, max(bound.y0, (y0 + band[0]) / zoom),
+                            bound.x1, min(bound.y1, (y0 + band[-1] + 1) / zoom))
+        result.append(visible if visible.height >= 2 else bound)
+    return result
 
 
 def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", progress_callback=None, provider=None, ocr_api_url=None):
@@ -1011,6 +1171,7 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
         # 词库键按翻译方向隔离：非中文目标使用 "原文@@目标语言" 后缀键，
         # 避免中→英与中→日等不同方向的译文互相污染（plain 键仅属于 zh 目标）
         jobs = []
+        job_line_heights = []
         for bi, b in enumerate(boxes):
             if bi in vlm_results:
                 original, dst = vlm_results[bi]
@@ -1028,47 +1189,88 @@ def process_pdf(input_path, output_path, selected_pages=None, target_lang="zh", 
                 # 已弃用 OCR 双向判别——RapidOCR 对倒置文本会内部纠偏，±90 度无法区分，
                 # 曾导致整本输出水平倒置。该规则经像素级模板匹配实验验证（R=270 页实measured）。
                 jobs.append((b['rect'], dst, ck, orig_rot))
+                job_line_heights.append(b.get('line_h', b['rect'].height))
 
         # --- 4) 原位擦除回填（方向 = 页面原始旋转角，显示水平正读） ---
         ins_count = 0
         if jobs:
-            # 先探测每个文字框的真实底色（矢量填充色优先，位图环带采样兜底），
+            # 先探测每个文字框的真实底色与所属单元格（矢量填充色优先，位图环带采样兜底），
             # 按探测色擦除而非写死白底——灰色表头/彩色底纹上不再留下白色补丁
-            bg_colors = probe_box_backgrounds(page, [j[0] for j in jobs])
+            bg_colors, bounds = probe_box_backgrounds(page, [j[0] for j in jobs])
+            visible_bounds = visible_cell_bounds(page, bg_colors, bounds)
             page.insert_font(fontname="cjk", fontfile=font_file)
-            for (rect, dst, ck, rot), bg in zip(jobs, bg_colors):
-                page.add_redact_annot(rect + (-0.5, -0.5, 0.5, 0.5), fill=bg)
+            for (rect, dst, ck, rot), bg, bound, visible in zip(jobs, bg_colors, bounds, visible_bounds):
+                erase = rect + (-0.5, -0.5, 0.5, 0.5)
+                clipped = bound is not None and visible is not None and bound.height - visible.height > max(2, bound.height * 0.2)
+                if bound is not None and visible is not None:
+                    safe_visible = fitz.Rect(visible)
+                    if clipped and visible.height > 2:
+                        safe_visible.y0 += 0.5
+                        safe_visible.y1 -= 0.5
+                    erase &= safe_visible
+                if not erase.is_empty:
+                    page.add_redact_annot(erase, fill=bg)
             try:
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
             except Exception:
                 page.apply_redactions()
-            for rect, dst, ck, rot in jobs:
-                # PyMuPDF rotate 为逆时针语义（90=向上书写）；与视觉模型输出的摆正角一致
+            for (rect, dst, ck, rot), bound, visible, line_height in zip(jobs, bounds, visible_bounds, job_line_heights):
+                clipped_height = None
+                if bound is not None and visible is not None and bound.height - visible.height > max(2, bound.height * 0.2):
+                    if not rect.intersects(visible):
+                        continue
+                    # A page-break clip can remove half a header: center its translation
+                    # in the visible portion instead of the hidden original text box.
+                    clipped_height = visible.height - 1
+                    height = min(rect.height, clipped_height)
+                    middle = (visible.y0 + visible.y1) / 2
+                    rect = fitz.Rect(rect.x0, middle - height / 2, rect.x1, middle + height / 2)
+                    bound = visible
+                # 纯西文译文走内置 Helvetica（原生西文观感），其余仍用 CJK 字体
+                use_ff = None if _is_latin_text(dst) else font_file
+                fname = "helv" if use_ff is None else "cjk"
+                # PyMuPDF rotate 为逆时针语义（90=向上书写）；与视觉模型输出的摆正角一致。
+                # 所有朝向均按实测行宽/字高把文字块在框内横纵居中，位置贴近原排版
                 if rot in (90, 270):    # 竖排：字高方向为 rect.width，行进方向为 rect.height；短标签不折行
-                    lines, calc_size = layout_backfill(dst, rect.height, rect.width, allow_wrap=False)
-                    if rot == 90:       # 向上书写：字形向右展开，基线靠左缘
-                        pos_list = [(rect.x0 + 0.15 * calc_size, rect.y1)]
-                    else:               # 向下书写：字形向左展开，基线靠右缘
-                        pos_list = [(rect.x1 - 0.15 * calc_size, rect.y0)]
+                    lines, calc_size = layout_backfill(dst, rect.height, rect.width, allow_wrap=False, fontfile=use_ff)
+                    lw = _text_w(lines[0], calc_size, use_ff)
+                    if rot == 90:       # 向上书写：文字沿 -y 行进、字形向 +x 展开
+                        pos_list = [(rect.x0 + (rect.width - 0.75 * calc_size) / 2,
+                                     rect.y0 + (rect.height + lw) / 2)]
+                    else:               # 向下书写：文字沿 +y 行进、字形向 -x 展开
+                        pos_list = [(rect.x1 - (rect.width - 0.75 * calc_size) / 2,
+                                     rect.y0 + (rect.height - lw) / 2)]
                 else:                   # 水平（0/180）：字高方向 rect.height，行进方向 rect.width
-                    lines, calc_size = layout_backfill(dst, rect.width, rect.height, allow_wrap=True)
-                    if len(lines) == 1:
-                        if rot == 180:  # 向左书写：字形向下展开，基线靠顶缘
-                            pos_list = [(rect.x1, rect.y0 + 0.15 * calc_size)]
-                        else:
-                            pos_list = [(rect.x0, rect.y1 - 0.15 * calc_size)]
-                    else:               # 折 2 行：行距 1.25×字号，两行整体在框内纵向居中
-                        gap = 1.25 * calc_size
-                        top = rect.y0 + (rect.height - (gap + calc_size)) / 2
-                        bases = (top + 0.8 * calc_size, top + 0.8 * calc_size + gap)
+                    # 宽度约束取所属单元格宽（远宽于 OCR 紧贴框，避免单词硬折断）；
+                    # 上限 4 倍防误把整页/整条底纹当单元格；无矢量命中（白底未画
+                    # 矩形/图片底）时放宽 2 倍——居中排布下对称扩展，不会单向冲格。
+                    # 字号始终锚定原文字框高。
+                    run_len = rect.width
+                    if bound is not None:
+                        centered = abs((rect.x0 + rect.x1 - bound.x0 - bound.x1) / 2) <= bound.width * 0.12
+                        if bound.width > run_len and (bound.width < rect.width * 4 or centered):
+                            run_len = max(rect.width, bound.width - 2)
+                    else:
+                        run_len = rect.width * 2.0
+                    lines, calc_size = layout_backfill(dst, run_len, min(rect.height, line_height), allow_wrap=True, fontfile=use_ff)
+                    if clipped_height:
+                        block_height = ((len(lines) - 1) * _LINE_GAP + 1) * calc_size
+                        if block_height > clipped_height:
+                            calc_size *= clipped_height / block_height
+                    gap = _LINE_GAP * calc_size
+                    block_h = (len(lines) - 1) * gap + calc_size
+                    first_base = rect.y0 + (rect.height - block_h) / 2 + 0.8 * calc_size
+                    pos_list = []
+                    for i, line in enumerate(lines):
+                        lw = _text_w(line, calc_size, use_ff)
+                        base = first_base + i * gap
                         if rot == 180:  # 180° 视图里靠上的行对应页面坐标 y 较大一侧
-                            mid = rect.y0 + rect.y1
-                            pos_list = [(rect.x1, mid - b) for b in bases]
+                            pos_list.append((rect.x0 + (rect.width + lw) / 2, rect.y0 + rect.y1 - base))
                         else:
-                            pos_list = [(rect.x0, b) for b in bases]
+                            pos_list.append((rect.x0 + (rect.width - lw) / 2, base))
                 try:
                     for line, pos in zip(lines, pos_list):
-                        page.insert_text(pos, line, fontname="cjk", fontfile=font_file,
+                        page.insert_text(pos, line, fontname=fname, fontfile=use_ff,
                                          fontsize=calc_size, color=(0, 0, 0), rotate=rot)
                     ins_count += 1
                     hit_counts[ck] = hit_counts.get(ck, 0) + 1
@@ -1549,6 +1751,84 @@ def translate_images_in_workbook(wb, provider, lang_name, target_lang, progress_
     return stats, usage, lang_votes
 
 
+# 老版 .xls（BIFF 二进制）的 OLE2 复合文档魔数：仅改扩展名不会变成真 .xlsx，
+# openpyxl 打开这类文件会报 "File contains no valid workbook part"
+OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+ZIP_MAGIC = b"PK\x03\x04"
+
+
+def read_file_magic(path, n=8):
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def convert_xls_to_xlsx(source_path, dest_path):
+    """老版 .xls（或只改了扩展名的 .xls）用本机 Excel/WPS 另存为真正的 .xlsx。
+    返回 (是否成功, 说明文本)；未装 Office 或调用失败返回失败说明。"""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        return False, "未安装 pywin32，无法自动转换老版 .xls 格式"
+    excel = None
+    wb = None
+    open_path = source_path
+    try:
+        pythoncom.CoInitialize()
+        last_err = None
+        for prog_id in ("Excel.Application", "ket.Application"):  # ket.Application = WPS 表格
+            try:
+                excel = win32com.client.DispatchEx(prog_id)
+                break
+            except Exception as e:
+                last_err = e
+        if excel is None:
+            return False, f"本机未找到可用的 Excel/WPS: {last_err}"
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        try:
+            excel.AutomationSecurity = 3  # msoAutomationSecurityForceDisable，禁宏防弹窗
+        except Exception:
+            pass
+        # Excel 会拒绝「扩展名与内容不符」的文件：内容是老 .xls 而扩展名是 .xlsx 时
+        # 直接报格式无效，所以先复制一份 .xls 扩展名的临时副本再打开
+        if not source_path.lower().endswith(".xls"):
+            open_path = source_path + ".convsrc.xls"
+            shutil.copyfile(source_path, open_path)
+        wb = excel.Workbooks.Open(os.path.abspath(open_path), UpdateLinks=0, ReadOnly=True)
+        wb.SaveAs(os.path.abspath(dest_path), FileFormat=51)  # 51 = xlOpenXMLWorkbook (.xlsx)
+        wb.Close(SaveChanges=False)
+        wb = None
+        if not os.path.exists(dest_path):
+            return False, "转换后未产出 .xlsx 文件"
+        return True, "已自动将老版 .xls 转换为 .xlsx"
+    except Exception as e:
+        return False, f"自动转换失败: {e}"
+    finally:
+        if open_path != source_path and os.path.exists(open_path):
+            try:
+                os.remove(open_path)
+            except OSError:
+                pass
+        try:
+            if wb is not None:
+                wb.Close(SaveChanges=False)
+        except Exception:
+            pass
+        try:
+            if excel is not None:
+                excel.Quit()
+        except Exception:
+            pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
 def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=None, provider=None, translate_images=True):
     """
     Excel 表格翻译主入口：收集可译单元格 -> 批量纯文本翻译（企业词库强制优先）
@@ -1569,15 +1849,46 @@ def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=No
     print(f"输出目标: {output_path}")
     print("=" * 50)
 
-    try:
-        # .xlsm 保留宏工程；普通 .xlsx 不带 keep_vba
-        wb = openpyxl.load_workbook(input_path, keep_vba=input_path.lower().endswith(".xlsm"))
-    except Exception as e:
-        return {"success": False, "error": f"无法读取表格文件: {e}"}
-
     def progress(frac, msg):
         if progress_callback:
             progress_callback(min(0.999, frac), msg)
+
+    # 文件格式探测：.xls 只改扩展名仍是老格式（OLE2 魔数），先经本机 Excel/WPS 转成真 .xlsx
+    source_path = input_path
+    magic = read_file_magic(input_path)
+    converted_tmp = None
+    if magic.startswith(OLE2_MAGIC):
+        print("  - 检测到老版 .xls 格式（仅改扩展名不改变内部格式），自动转换中...")
+        progress(0.01, "检测到老版 .xls 格式，正在自动转换为 .xlsx...")
+        converted_tmp = input_path + ".conv.xlsx"
+        ok, msg = convert_xls_to_xlsx(input_path, converted_tmp)
+        if not ok:
+            try:
+                os.remove(converted_tmp)
+            except OSError:
+                pass
+            return {"success": False, "error":
+                "该文件是老版 .xls 格式（只改扩展名不会真正转换）。" + msg +
+                "。请用 Excel/WPS 打开后「另存为 → Excel 工作簿(.xlsx)」再上传"}
+        print(f"  - {msg}")
+        input_path = converted_tmp
+    try:
+        # .xlsm 保留宏工程；普通 .xlsx 不带 keep_vba（转换产物是 .xlsx，自然不带宏）
+        wb = openpyxl.load_workbook(input_path, keep_vba=input_path.lower().endswith(".xlsm"))
+        restored = restore_wps_cell_images(wb, source_path)
+        if restored:
+            print(f"  - 已恢复 {restored} 张 WPS 单元格图片")
+    except Exception as e:
+        hint = ""
+        if magic and not magic.startswith((ZIP_MAGIC, OLE2_MAGIC)):
+            hint = "（文件内容既不是 .xlsx 工作簿也不是老版 .xls，可能是网页导出或已损坏的文件）"
+        return {"success": False, "error": f"无法读取表格文件: {e}{hint}"}
+    finally:
+        if converted_tmp and os.path.exists(converted_tmp):
+            try:
+                os.remove(converted_tmp)
+            except OSError:
+                pass
 
     # --- 1) 收集翻译单元：字符串单元格按 \n 拆行，每行一个单元（公式/数字/日期跳过） ---
     cells = {}    # (sheet标题, 坐标) -> {'lines': [原行...], 'units': {行号: 全局id}}
