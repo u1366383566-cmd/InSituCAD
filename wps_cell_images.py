@@ -33,8 +33,11 @@ def _picture_data(source_path):
         source = source_path
     with zipfile.ZipFile(source) as archive:
         try:
-            xml = archive.read('xl/cellImages.xml')
-            rel_xml = archive.read('xl/_rels/cellImages.xml.rels')
+            # WPS versions use both cellImages.xml and cellimages.xml.
+            # ZIP member names are case-sensitive even on Windows.
+            members = {name.casefold(): name for name in archive.namelist()}
+            xml = archive.read(members['xl/cellimages.xml'])
+            rel_xml = archive.read(members['xl/_rels/cellimages.xml.rels'])
         except KeyError:
             return {}
         rels = {r.get('Id'): r.get('Target') for r in ET.fromstring(rel_xml)
