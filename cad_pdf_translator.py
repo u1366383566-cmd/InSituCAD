@@ -16,6 +16,9 @@ CAD图纸专业翻译器 (基于 RapidOCR + DeepSeek 原位重构引擎)
 import sys
 import os
 import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 import re
 import io
 import json
@@ -1766,8 +1769,30 @@ def read_file_magic(path, n=8):
 
 
 def convert_xls_to_xlsx(source_path, dest_path):
-    """老版 .xls（或只改了扩展名的 .xls）用本机 Excel/WPS 另存为真正的 .xlsx。
+    """老版 .xls 转为 .xlsx：Windows 使用 Excel/WPS，Linux 使用 LibreOffice。
     返回 (是否成功, 说明文本)；未装 Office 或调用失败返回失败说明。"""
+    if sys.platform != 'win32':
+        soffice = shutil.which('libreoffice') or shutil.which('soffice')
+        if not soffice:
+            return False, "未安装 LibreOffice，无法自动转换老版 .xls 格式"
+        try:
+            # 独立配置目录避免并发请求互相抢占，也不连接正在运行的桌面实例。
+            with tempfile.TemporaryDirectory(prefix='insitucad-xls-') as tmp:
+                source_copy = os.path.join(tmp, 'source.xls')
+                shutil.copyfile(source_path, source_copy)
+                profile = Path(tmp, 'profile').as_uri()
+                result = subprocess.run(
+                    [soffice, '-env:UserInstallation=' + profile, '--headless',
+                     '--convert-to', 'xlsx:Calc MS Excel 2007 XML', '--outdir', tmp, source_copy],
+                    capture_output=True, text=True, timeout=180, check=False)
+                converted = os.path.join(tmp, 'source.xlsx')
+                if result.returncode != 0 or not os.path.isfile(converted):
+                    detail = (result.stderr or result.stdout).strip()[-500:]
+                    return False, 'LibreOffice 转换失败' + (': ' + detail if detail else '')
+                shutil.copyfile(converted, dest_path)
+            return True, '已使用 LibreOffice 将老版 .xls 转换为 .xlsx'
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f'LibreOffice 转换失败: {e}'
     try:
         import pythoncom
         import win32com.client
@@ -1869,7 +1894,7 @@ def process_xlsx(input_path, output_path, target_lang="zh", progress_callback=No
                 pass
             return {"success": False, "error":
                 "该文件是老版 .xls 格式（只改扩展名不会真正转换）。" + msg +
-                "。请用 Excel/WPS 打开后「另存为 → Excel 工作簿(.xlsx)」再上传"}
+                "。请安装转换工具，或先另存为 Excel 工作簿(.xlsx) 后再上传"}
         print(f"  - {msg}")
         input_path = converted_tmp
     try:

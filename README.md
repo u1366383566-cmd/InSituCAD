@@ -37,6 +37,8 @@ python server.py
 
 Then open `http://127.0.0.1:7860`. LAN colleagues can use `http://<your-lan-ip>:7860` (the actual address is printed on startup).
 
+On Linux, install LibreOffice Calc to convert legacy `.xls` files automatically. Windows uses the installed Excel or WPS application for this conversion.
+
 > CJK fonts: system fonts (SimHei / Microsoft YaHei) are used automatically — no extra downloads.
 
 ## Configuration
